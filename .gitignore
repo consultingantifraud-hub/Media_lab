@@ -1,25 +1,59 @@
-
-*~
-*$py.class
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
 *.backup
 *.bak
-build/
+*~
+
 # Database
 *.db
+*.sqlite
+*.sqlite3
 db/*.db
 !db/.gitkeep
-dist/
-# Docker
-.dockerignore
-docs_backup_*/
-.DS_Store
-*.egg-info/
-.env
-env/
-# Environment
-.env.local
-# IDE
-.idea/
-*.log
+
+# Media files - ВСЕ медиа файлы исключены
+media/images/*
+media/videos/*
 media/edits/*
 media/face_swap/*
+media/*.png
+media/*.jpg
+media/*.jpeg
+media/*.gif
+media/*.webp
+media/*.mp4
+media/*.avi
+media/*.mov
+!media/.gitkeep
+!media/images/.gitkeep
+!media/videos/.gitkeep
+!media/edits/.gitkeep
+!media/face_swap/.gitkeep
+
+# Environment
+.env
+.env.local
+*.log
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Backups
+docs_backup_*/

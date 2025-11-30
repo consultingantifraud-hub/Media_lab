@@ -812,7 +812,7 @@ async def _ensure_job_source_path(job_id: str) -> Path | None:
     return None
 
 
-async def _trigger_upscale_for_job(message: types.Message, job_id: str, operation_id: int | None = None) -> bool:
+async def _trigger_upscale_for_job(message: types.Message, job_id: str, operation_id: int | None = None, state: FSMContext | None = None) -> bool:
     from app.services.billing import BillingService
     from app.services.pricing import get_operation_price
     from app.db.base import SessionLocal
@@ -831,9 +831,10 @@ async def _trigger_upscale_for_job(message: types.Message, job_id: str, operatio
             price = get_operation_price("upscale")
             
             # Check for active discount code in state or database
-            discount_percent = None
-            if state:
-                discount_percent = await get_operation_discount_percent(state, user_id)
+            discount_percent = await get_operation_discount_percent(state, user_id) if state else None
+            if discount_percent is None and user.operation_discount_percent:
+                # Use discount from database if state is not available
+                discount_percent = user.operation_discount_percent
             
             success, error_msg, op_id = BillingService.charge_operation(
                 db, user.id, "upscale",
@@ -943,7 +944,7 @@ async def _handle_upscale_text(message: types.Message, state: FSMContext, text: 
                 reply_markup=build_main_keyboard(),
             )
             return
-        triggered = await _trigger_upscale_for_job(message, job_id)
+        triggered = await _trigger_upscale_for_job(message, job_id, state=state)
         if triggered:
             await _clear_upscale_state(state)
         return
@@ -2036,7 +2037,7 @@ async def handle_upscale_callback(callback: types.CallbackQuery, state: FSMConte
         return
     job_id = callback.data.split(":", 1)[1]
     if callback.message:
-        triggered = await _trigger_upscale_for_job(callback.message, job_id)
+        triggered = await _trigger_upscale_for_job(callback.message, job_id, state=state)
         if triggered:
             await callback.answer("Апскейл запущен!", show_alert=False)
         else:
@@ -3105,6 +3106,7 @@ def register_image_handlers(dp: Dispatcher) -> None:
         # Пропускаем, если пользователь в режиме "Написать" или в режиме помощи
         current_state = await state.get_state()
         from app.bot.handlers.help import HelpStates
+        from app.bot.handlers.billing import PaymentStates
         if current_state == HelpStates.waiting_help_choice.state:
             return False
         if current_state == HelpStates.waiting_ai_assistant_input.state:
@@ -3112,6 +3114,8 @@ def register_image_handlers(dp: Dispatcher) -> None:
         if current_state == HelpStates.waiting_support_message.state:
             return False
         if current_state == "PromptWriterStates:waiting_input":
+            return False
+        if current_state == PaymentStates.BALANCE_MENU_SHOWN.state:
             return False
         return True
     

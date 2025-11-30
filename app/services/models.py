@@ -1,5 +1,5 @@
 """Database models for Media Lab Bot."""
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -45,7 +45,6 @@ class User(Base):
     language_code = Column(String, nullable=True)  # Language code (e.g., "ru", "en")
     is_premium = Column(sa.Boolean, default=False, nullable=False)  # Telegram Premium status
     last_activity_at = Column(DateTime(timezone=True), nullable=True)  # Last activity timestamp
-    email = Column(String, nullable=True)  # Email for receipts (required for payments)
     
     # Active discount code for operations
     operation_discount_code_id = Column(Integer, ForeignKey("discount_codes.id"), nullable=True, index=True)

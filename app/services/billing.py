@@ -641,21 +641,49 @@ class BillingService:
         db: Session,
         user_id: int,
         limit: int = 20,
-        offset: int = 0
+        offset: int = 0,
+        days: Optional[int] = None
     ) -> list[dict]:
         """
-        Get user operations history.
+        Get user operations history (including payments and charges).
+        
+        Args:
+            days: Filter by last N days (None = all)
         
         Returns:
             List of operation dicts with type, price, status, created_at, discount info
+            Includes both Operation (charges) and Payment (deposits) records
         """
         from sqlalchemy import desc
+        from app.db.models import Payment, PaymentStatus
+        from datetime import datetime, timedelta, timezone
         
-        operations = db.query(Operation).filter(
+        # Calculate date filter if needed
+        date_filter = None
+        if days:
+            date_filter = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Get operations (charges)
+        operations_query = db.query(Operation).filter(
             Operation.user_id == user_id
-        ).order_by(desc(Operation.created_at)).limit(limit).offset(offset).all()
+        )
+        if date_filter:
+            operations_query = operations_query.filter(Operation.created_at >= date_filter)
+        operations = operations_query.order_by(desc(Operation.created_at)).all()
         
+        # Get payments (deposits) - only succeeded payments
+        payments_query = db.query(Payment).filter(
+            Payment.user_id == user_id,
+            Payment.status == PaymentStatus.SUCCEEDED
+        )
+        if date_filter:
+            payments_query = payments_query.filter(Payment.created_at >= date_filter)
+        payments = payments_query.order_by(desc(Payment.created_at)).all()
+        
+        # Combine and sort by created_at
         result = []
+        
+        # Add operations
         for op in operations:
             result.append({
                 "id": op.id,
@@ -666,14 +694,54 @@ class BillingService:
                 "status": op.status.value,
                 "created_at": op.created_at,
                 "task_id": op.task_id,
+                "record_type": "operation"
             })
         
-        return result
+        # Add payments
+        for payment in payments:
+            result.append({
+                "id": payment.id,
+                "type": "payment",
+                "price": payment.amount,  # amount is in kopecks
+                "original_price": None,
+                "discount_percent": None,
+                "status": payment.status.value,
+                "created_at": payment.created_at,
+                "task_id": None,
+                "record_type": "payment"
+            })
+        
+        # Sort by created_at descending
+        result.sort(key=lambda x: x["created_at"], reverse=True)
+        
+        # Apply limit and offset
+        return result[offset:offset + limit]
 
     @staticmethod
-    def get_operations_count(db: Session, user_id: int) -> int:
-        """Get total count of user operations."""
-        return db.query(Operation).filter(Operation.user_id == user_id).count()
+    def get_operations_count(db: Session, user_id: int, days: Optional[int] = None) -> int:
+        """Get total count of user operations (including payments)."""
+        from app.db.models import Payment, PaymentStatus
+        from datetime import datetime, timedelta, timezone
+        
+        # Calculate date filter if needed
+        date_filter = None
+        if days:
+            date_filter = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        operations_query = db.query(Operation).filter(Operation.user_id == user_id)
+        if date_filter:
+            operations_query = operations_query.filter(Operation.created_at >= date_filter)
+        operations_count = operations_query.count()
+        
+        payments_query = db.query(Payment).filter(
+            Payment.user_id == user_id,
+            Payment.status == PaymentStatus.SUCCEEDED
+        )
+        if date_filter:
+            payments_query = payments_query.filter(Payment.created_at >= date_filter)
+        payments_count = payments_query.count()
+        
+        return operations_count + payments_count
 
 
 # Convenience functions

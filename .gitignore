@@ -1,59 +1,56 @@
 # Python
 __pycache__/
 *.py[cod]
-*.class
+*\.class
 *.so
 .Python
-env/
-venv/
-.venv/
 *.egg-info/
 dist/
 build/
-*.backup
-*.bak
-*~
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
 
 # Database
 *.db
 *.sqlite
 *.sqlite3
-db/*.db
-!db/.gitkeep
+db/
+media_lab*.db
 
-# Media files - ВСЕ медиа файлы исключены
-media/images/*
-media/videos/*
-media/edits/*
-media/face_swap/*
-media/*.png
-media/*.jpg
-media/*.jpeg
-media/*.gif
-media/*.webp
-media/*.mp4
-media/*.avi
-media/*.mov
-!media/.gitkeep
-!media/images/.gitkeep
-!media/videos/.gitkeep
-!media/edits/.gitkeep
-!media/face_swap/.gitkeep
+# Media files
+media/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.webm
+*.tmp
 
-# Environment
-.env
-.env.local
+# Logs
 *.log
+logs/
+*.txt
+bot_logs.txt
+worker_logs.txt
 
-# Docker
-.dockerignore
+# Temporary files
+tmp/
+*.tmp
+~\$*
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-
-# Backups
-docs_backup_*/
+# Secrets
+*Пароли*
+*passwords*
+*secrets*
+*credentials*
+server_connection.py
+deploy/config/server-credentials.json

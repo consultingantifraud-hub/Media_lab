@@ -26,6 +26,17 @@ def setup_handlers(dp: Dispatcher) -> None:
     # Регистрируем Stylish text ПЕРЕД image handlers, чтобы иметь приоритет
     register_stylish_text_handlers(dp)
     register_image_handlers(dp)  # Внутри регистрируется обработчик кнопки "Написать"
+    # Регистрируем обработчик текста после показа меню баланса ПОСЛЕ image handlers
+    # чтобы он проверялся ПЕРВЫМ (в aiogram обработчики проверяются в обратном порядке)
+    from .billing import handle_text_after_balance_menu, PaymentStates
+    from aiogram import F
+    from aiogram.filters import StateFilter
+    
+    dp.message.register(
+        handle_text_after_balance_menu,
+        StateFilter(PaymentStates.BALANCE_MENU_SHOWN),
+        F.text
+    )
     # ВАЖНО: Регистрируем обработчик состояния prompt_writer ПОСЛЕ image handlers,
     # чтобы он проверялся ПЕРВЫМ (в aiogram обработчики проверяются в обратном порядке регистрации)
     # Обработчик с фильтром состояния имеет приоритет над общим обработчиком текста

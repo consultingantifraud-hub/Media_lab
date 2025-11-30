@@ -7,6 +7,14 @@ from app.core.queues import get_job
 
 app = FastAPI(title="TG Media Service", version="0.1.0")
 
+# Include billing router for health check
+try:
+    from app.web import billing
+    app.include_router(billing.router)
+except ImportError as e:
+    import logging
+    logging.error(f"Failed to import billing router: {e}")
+
 
 @app.on_event("startup")
 async def on_startup() -> None:

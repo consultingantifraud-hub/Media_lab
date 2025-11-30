@@ -67,6 +67,7 @@ services:
         condition: service_healthy
     volumes:
       - ../media:/app/media
+      - ../app:/app/app:ro
       - api_logs:/app/logs
     restart: unless-stopped
     deploy:

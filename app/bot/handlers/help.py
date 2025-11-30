@@ -36,6 +36,8 @@ class HelpStates(StatesGroup):
 
 # LLM настройки для ИИ-помощника
 LLM_ENDPOINT = "fal-ai/any-llm"
+# Используем Claude 3.5 Sonnet (Haiku не поддерживается через any-llm)
+# Оптимизированные параметры (temperature=0.5, max_tokens=600) ускоряют ответы
 AI_ASSISTANT_MODEL = "anthropic/claude-3.5-sonnet"
 
 AI_ASSISTANT_SYSTEM_PROMPT = """**Промт для ИИ-помощника Telegram-сервиса**
@@ -54,7 +56,7 @@ AI_ASSISTANT_SYSTEM_PROMPT = """**Промт для ИИ-помощника Tele
 
    * Основные модели: **Nano Banana Pro**, **Nano Banana**, **Seedream**.
 
-   * **Nano Banana Pro** — самая сильная нейросеть в сервисе, хорошо пишет русские слова на изображении, подходит для сложных сцен и длинных текстов. После ввода промпта и выбора формата можно выбрать качество: "Быстрее" (время генерации до 2 минут) или "Качественнее" (время генерации до 3 минут, более детальный результат). Стоимость: 26₽.
+   * **Nano Banana Pro** — самая сильная нейросеть в сервисе, хорошо пишет русские слова на изображении, подходит для сложных сцен и длинных текстов. Стоимость: 26₽.
 
    * **Nano Banana** — топовая нейросеть, хорошо формирует изображения и частично пишет русские слова (в первую очередь заголовки). Стоимость: 9₽.
 
@@ -409,40 +411,92 @@ async def handle_ai_assistant_message(message: types.Message, state: FSMContext)
         await message.answer("🤔 Думаю...")
         
         # Вызываем LLM через fal.ai
+        # Оптимизированные параметры для быстрых ответов:
+        # - temperature: 0.5 (меньше вариативности = быстрее)
+        # - max_tokens: 600 (достаточно для кратких ответов, быстрее генерация)
         payload = {
             "model": AI_ASSISTANT_MODEL,
             "prompt": user_question,
             "system_prompt": AI_ASSISTANT_SYSTEM_PROMPT,
-            "temperature": 0.7,
-            "max_tokens": 1000,
+            "temperature": 0.4,  # Низкая температура для быстрых и точных ответов
+            "max_tokens": 500,  # Уменьшено для ускорения генерации (достаточно для кратких ответов)
         }
         
         logger.info("AI Assistant request: {} (model: {})", user_question, AI_ASSISTANT_MODEL)
         response = await asyncio.to_thread(run_model, LLM_ENDPOINT, payload)
         
-        # Извлекаем ответ из ответа API
+        # Логируем полный ответ для отладки
+        logger.debug("AI Assistant raw response: {}", response)
+        
+        answer = None
+        
+        # Извлекаем ответ из ответа API (проверяем различные форматы)
         if isinstance(response, dict):
+            # Формат 1: response["output"] (строка или dict)
             if "output" in response:
                 output = response["output"]
-                if isinstance(output, str) and output:
+                if isinstance(output, str) and output.strip():
                     answer = output.strip()
-                elif isinstance(output, dict) and "text" in output:
-                    answer = output["text"].strip()
-            elif "text" in response:
-                answer = response["text"].strip()
-            elif "content" in response:
+                elif isinstance(output, dict):
+                    if "text" in output and output["text"]:
+                        answer = str(output["text"]).strip()
+                    elif "content" in output:
+                        content = output["content"]
+                        if isinstance(content, str) and content.strip():
+                            answer = content.strip()
+                        elif isinstance(content, list) and len(content) > 0:
+                            first_item = content[0]
+                            if isinstance(first_item, dict) and "text" in first_item:
+                                answer = str(first_item["text"]).strip()
+            
+            # Формат 2: response["text"]
+            if not answer and "text" in response:
+                text = response["text"]
+                if text and str(text).strip():
+                    answer = str(text).strip()
+            
+            # Формат 3: response["content"]
+            if not answer and "content" in response:
                 content = response["content"]
-                if isinstance(content, str):
+                if isinstance(content, str) and content.strip():
                     answer = content.strip()
                 elif isinstance(content, list) and len(content) > 0:
                     first_item = content[0]
-                    if isinstance(first_item, dict) and "text" in first_item:
-                        answer = first_item["text"].strip()
+                    if isinstance(first_item, dict):
+                        if "text" in first_item:
+                            answer = str(first_item["text"]).strip()
+                        elif "content" in first_item:
+                            answer = str(first_item["content"]).strip()
+            
+            # Формат 4: response["message"] или response["response"]
+            if not answer:
+                for key in ["message", "response", "result"]:
+                    if key in response:
+                        value = response[key]
+                        if isinstance(value, str) and value.strip():
+                            answer = value.strip()
+                            break
+                        elif isinstance(value, dict) and "text" in value:
+                            answer = str(value["text"]).strip()
+                            break
+        
+        # Валидация ответа: проверяем, что ответ не пустой и не содержит только мусор
+        if answer:
+            # Удаляем ответы, которые выглядят как ошибки или мусор
+            answer_lower = answer.lower().strip()
+            if len(answer) < 10 or answer_lower in ["error", "null", "none", "undefined"]:
+                logger.warning("AI Assistant returned suspicious answer: '{}', treating as invalid", answer)
+                answer = None
         
         if not answer:
+            logger.error("AI Assistant failed to extract valid answer from response: {}", response)
             answer = "Извините, не удалось получить ответ. Попробуйте переформулировать вопрос или обратитесь в техподдержку."
         
         await message.answer(answer, parse_mode="Markdown")
+        # НЕ очищаем состояние - оставляем пользователя в режиме ИИ-помощника,
+        # чтобы он мог задавать несколько вопросов подряд
+        # Состояние очистится только при нажатии кнопки (через handle_ai_assistant_button_after_answer)
+        # или при явном выходе из режима помощи
         
     except Exception as e:
         logger.error("Error in AI Assistant: {}", e, exc_info=True)
@@ -583,17 +637,36 @@ async def handle_help_choice_text(message: types.Message, state: FSMContext) -> 
     )
 
 
+async def handle_ai_assistant_button_after_answer(message: types.Message, state: FSMContext) -> None:
+    """Обработчик кнопок после получения ответа от ИИ-помощника."""
+    # Сбрасываем состояние ИИ-помощника, чтобы другие обработчики могли обработать кнопку
+    logger.debug("AI Assistant: button pressed after answer, clearing state: {}", message.text)
+    await state.clear()
+    # Не отвечаем здесь - пусть другие обработчики обработают кнопку
+
+
 def register_help_handlers(dp: Dispatcher) -> None:
     """Регистрация обработчиков помощи."""
     dp.message.register(handle_help_start, _match_button(HELP_BUTTON))
     dp.message.register(handle_ai_assistant_start, _match_button(HELP_AI_ASSISTANT_BUTTON))
     dp.message.register(handle_support, _match_button(HELP_SUPPORT_BUTTON))
     # Регистрируем обработчик сообщений для ИИ-помощника с StateFilter для приоритета
+    # ВАЖНО: В aiogram обработчики проверяются в ОБРАТНОМ порядке регистрации
+    # Поэтому этот обработчик регистрируется ПЕРВЫМ, чтобы проверяться ПОСЛЕДНИМ
     dp.message.register(
         handle_ai_assistant_message,
         StateFilter(HelpStates.waiting_ai_assistant_input),
         F.text
     )
+    # Регистрируем обработчик кнопок после получения ответа от ИИ-помощника (высокий приоритет)
+    # Этот обработчик регистрируется ПОСЛЕ обработчика сообщений, поэтому проверяется ПЕРВЫМ
+    # и сбрасывает состояние до того, как обработчик сообщений попытается обработать кнопку
+    for button in KEYBOARD_BUTTONS:
+        dp.message.register(
+            handle_ai_assistant_button_after_answer,
+            StateFilter(HelpStates.waiting_ai_assistant_input),
+            F.text == button
+        )
     # Регистрируем обработчик сообщений после показа "Вопрос разработчикам"
     dp.message.register(
         handle_support_message,

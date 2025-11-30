@@ -31,7 +31,8 @@ class PaymentService:
         db: Session,
         user_id: int,
         amount: int,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        email: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Create payment in YooKassa.
@@ -51,13 +52,28 @@ class PaymentService:
         if not user:
             logger.error(f"User not found: user_id={user_id}")
             return None
+        
+        # Use provided email or user's saved email
+        user_email = email or user.email
+        if not user_email:
+            logger.error(f"Email is required for payment: user_id={user_id}, provided_email={email}, saved_email={user.email}")
+            return None
+        
+        logger.info(f"Creating payment with email: {user_email} for user_id={user_id}, amount={amount}₽")
+        logger.debug(f"Receipt will be sent to: {user_email}")
+        
+        # Save email to user if provided and different
+        if email and user.email != email:
+            user.email = email
+            db.commit()
 
-        # Generate payment ID
-        payment_id = str(uuid.uuid4())
+        # Generate payment ID for return URL
+        payment_id_for_url = str(uuid.uuid4())
         yookassa_payment_id = None
 
         try:
             # Create payment in YooKassa
+            # Note: receipt is not required for all payment types, but may be required by shop settings
             payment_data = {
                 "amount": {
                     "value": f"{amount:.2f}",
@@ -65,13 +81,36 @@ class PaymentService:
                 },
                 "confirmation": {
                     "type": "redirect",
-                    "return_url": YOOKASSA_RETURN_URL
+                    "return_url": f"https://t.me/neurostudio_ai_bot?start=payment_{payment_id_for_url}"
                 },
                 "capture": True,
                 "description": description or f"Пополнение баланса на {amount}₽",
                 "metadata": {
                     "telegram_user_id": str(user.telegram_id),
-                    "payment_id": payment_id
+                    "return_payment_id": payment_id_for_url
+                },
+                # Add receipt if required by shop settings (for Russian tax compliance)
+                # Receipt can be disabled in YooKassa shop settings if not needed
+                # According to YooKassa docs: https://yookassa.ru/developers/payment-acceptance/getting-started/quick-start
+                "receipt": {
+                    "customer": {
+                        "email": user_email
+                    },
+                    "items": [
+                        {
+                            "description": (description or f"Пополнение баланса на {amount}₽")[:128],  # Max 128 chars
+                            "quantity": "1.000",  # Must be decimal with 3 decimal places
+                            "amount": {
+                                "value": f"{amount:.2f}",
+                                "currency": YOOKASSA_CURRENCY
+                            },
+                            "vat_code": 1,  # НДС не облагается (для цифровых услуг)
+                            "payment_mode": "full_payment",  # Полный расчет
+                            "payment_subject": "service"  # Услуга (для цифровых услуг)
+                        }
+                    ],
+                    "internet": "true",  # Указать, что это интернет-платеж
+                    "timezone": 3  # Часовой пояс (Москва UTC+3)
                 }
             }
 
@@ -88,7 +127,7 @@ class PaymentService:
                     headers={
                         "Authorization": f"Basic {auth_b64}",
                         "Content-Type": "application/json",
-                        "Idempotence-Key": payment_id
+                        "Idempotence-Key": payment_id_for_url
                     }
                 )
 
@@ -101,16 +140,24 @@ class PaymentService:
             confirmation_url = payment_response.get("confirmation", {}).get("confirmation_url")
 
             if not yookassa_payment_id or not confirmation_url:
-                logger.error(f"Invalid YooKassa response: {payment_response}")
+                logger.error(f"Invalid YooKassa response: missing id or confirmation_url. Response: {payment_response}")
                 return None
 
             # Save payment to database
+            # amount is in rubles, but we store it in kopecks (like balance)
+            amount_kopecks = int(round(amount * 100))
+            # Store payment_id_for_url in raw_data for lookup
+            payment_response_with_return_id = payment_response.copy()
+            if "metadata" not in payment_response_with_return_id:
+                payment_response_with_return_id["metadata"] = {}
+            payment_response_with_return_id["metadata"]["return_payment_id"] = payment_id_for_url
+            
             payment = Payment(
                 user_id=user_id,
                 yookassa_payment_id=yookassa_payment_id,
-                amount=amount,
+                amount=amount_kopecks,  # Store in kopecks
                 status=PaymentStatus.PENDING,
-                raw_data=payment_response
+                raw_data=payment_response_with_return_id
             )
             db.add(payment)
             db.commit()
@@ -125,6 +172,7 @@ class PaymentService:
 
         except Exception as e:
             logger.error(f"Error creating payment: {e}", exc_info=True)
+            logger.error(f"Payment creation failed for user_id={user_id}, amount={amount}₽")
             db.rollback()
             return None
 
@@ -176,11 +224,11 @@ class PaymentService:
         # Проверка суммы платежа (из webhook)
         webhook_amount_value = payment_object.get("amount", {}).get("value")
         if webhook_amount_value:
-            webhook_amount = int(float(webhook_amount_value) * 100)  # Конвертируем в копейки
-            if webhook_amount != payment.amount:
+            webhook_amount_kopecks = int(float(webhook_amount_value) * 100)  # Конвертируем в копейки
+            if webhook_amount_kopecks != payment.amount:
                 logger.error(
                     f"Amount mismatch for payment {payment.id}: "
-                    f"DB={payment.amount}₽, webhook={webhook_amount}₽"
+                    f"DB={payment.amount} kopecks, webhook={webhook_amount_kopecks} kopecks"
                 )
                 # Не отклоняем платеж, но логируем ошибку
                 # В реальности суммы должны совпадать
@@ -194,7 +242,10 @@ class PaymentService:
         db.flush()
 
         # Add balance to user
-        success = BillingService.add_balance(db, payment.user_id, payment.amount)
+        # payment.amount is in kopecks, but add_balance expects rubles and converts to kopecks
+        # So we need to convert kopecks back to rubles
+        amount_rubles = payment.amount / 100.0
+        success = BillingService.add_balance(db, payment.user_id, amount_rubles)
         if success:
             # Получаем баланс после пополнения
             balance_after = BillingService.get_user_balance(db, payment.user_id)
@@ -206,26 +257,33 @@ class PaymentService:
             db.commit()
             
             # Детальное логирование
+            # Convert kopecks to rubles for logging
+            amount_rubles = payment.amount / 100.0
+            balance_before_rubles = balance_before / 100.0
+            balance_after_rubles = balance_after / 100.0
             logger.info(
                 f"Payment processed successfully: "
                 f"payment_id={payment.id}, "
                 f"yookassa_id={yookassa_payment_id}, "
                 f"user_id={payment.user_id}, "
-                f"amount={payment.amount}₽, "
-                f"balance_before={balance_before}₽, "
-                f"balance_after={balance_after}₽"
+                f"amount={amount_rubles:.2f}₽ ({payment.amount} kopecks), "
+                f"balance_before={balance_before_rubles:.2f}₽ ({balance_before} kopecks), "
+                f"balance_after={balance_after_rubles:.2f}₽ ({balance_after} kopecks)"
             )
             
             # Отправка уведомления пользователю
             if user:
                 try:
                     from app.core.telegram_sync import send_message_sync
+                    # payment.amount is in kopecks, convert to rubles for display
+                    amount_rubles = payment.amount / 100.0
+                    balance_after_rubles = balance_after / 100.0
                     send_message_sync(
                         chat_id=user.telegram_id,
                         text=(
                             f"🎉 **Оплата прошла успешно!**\n\n"
-                            f"💰 Ваш баланс пополнен на {payment.amount}₽\n"
-                            f"💵 Текущий баланс: {balance_after}₽"
+                            f"💰 Ваш баланс пополнен на {amount_rubles:.2f}₽\n"
+                            f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
                         ),
                         parse_mode="Markdown"
                     )
@@ -283,10 +341,108 @@ class PaymentService:
 
         return {
             "id": payment.id,
-            "amount": payment.amount,
+            "amount": payment.amount / 100.0,  # Convert kopecks to rubles for display
+            "amount_kopecks": payment.amount,
             "status": payment.status.value,
             "created_at": payment.created_at.isoformat() if payment.created_at else None,
         }
+
+    @staticmethod
+    def check_payment_status_from_yookassa(db: Session, yookassa_payment_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Check payment status directly from YooKassa API.
+        This is simpler than webhook - just check status after user returns.
+        
+        Returns:
+            dict with payment status info, or None on error
+        """
+        if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
+            logger.error("YooKassa credentials not configured")
+            return None
+
+        try:
+            # Make request to YooKassa
+            auth_string = f"{YOOKASSA_SHOP_ID}:{YOOKASSA_SECRET_KEY}"
+            auth_bytes = auth_string.encode("utf-8")
+            auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
+
+            with httpx.Client(timeout=30.0) as client:
+                response = client.get(
+                    f"{YOOKASSA_API_URL}/payments/{yookassa_payment_id}",
+                    headers={
+                        "Authorization": f"Basic {auth_b64}",
+                        "Content-Type": "application/json",
+                    }
+                )
+
+            if response.status_code != 200:
+                logger.error(f"YooKassa API error: {response.status_code}, {response.text}")
+                return None
+
+            payment_data = response.json()
+            status = payment_data.get("status")
+            paid = payment_data.get("paid", False)
+
+            # Find payment in database
+            payment = db.query(Payment).filter(
+                Payment.yookassa_payment_id == yookassa_payment_id
+            ).first()
+
+            if not payment:
+                logger.warning(f"Payment not found in DB: yookassa_id={yookassa_payment_id}")
+                return None
+
+            # Update status if changed
+            if status == "succeeded" and payment.status != PaymentStatus.SUCCEEDED:
+                if paid:
+                    # Process payment
+                    amount_rubles = payment.amount / 100.0
+                    success = BillingService.add_balance(db, payment.user_id, amount_rubles)
+                    if success:
+                        payment.status = PaymentStatus.SUCCEEDED
+                        payment.raw_data = payment_data
+                        db.commit()
+                        
+                        # Send notification to user
+                        from app.db.models import User
+                        user = db.query(User).filter(User.id == payment.user_id).first()
+                        if user:
+                            try:
+                                from app.core.telegram_sync import send_message_sync
+                                balance_after = BillingService.get_user_balance(db, payment.user_id)
+                                balance_after_rubles = balance_after / 100.0
+                                send_message_sync(
+                                    chat_id=user.telegram_id,
+                                    text=(
+                                        f"🎉 *Оплата прошла успешно!*\n\n"
+                                        f"💰 Ваш баланс пополнен на {amount_rubles:.2f}₽\n"
+                                        f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
+                                    ),
+                                    parse_mode="Markdown"
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to send notification: {e}")
+                        
+                        logger.info(f"Payment confirmed: payment_id={payment.id}, amount={amount_rubles}₽")
+                    else:
+                        db.rollback()
+                        logger.error(f"Failed to add balance for payment: payment_id={payment.id}")
+            elif status == "canceled" and payment.status != PaymentStatus.CANCELED:
+                payment.status = PaymentStatus.CANCELED
+                payment.raw_data = payment_data
+                db.commit()
+                logger.info(f"Payment canceled: payment_id={payment.id}")
+
+            return {
+                "status": status,
+                "paid": paid,
+                "payment_id": payment.id,
+                "amount": payment.amount / 100.0,
+            }
+
+        except Exception as e:
+            logger.error(f"Error checking payment status: {e}", exc_info=True)
+            return None
 
 
 # Convenience functions

@@ -1,0 +1,19 @@
+# Media files - все медиа файлы исключены
+media/images/*
+media/videos/*
+media/edits/*
+media/face_swap/*
+media/*.png
+media/*.jpg
+media/*.jpeg
+media/*.gif
+media/*.webp
+media/*.mp4
+media/*.avi
+media/*.mov
+# Но оставляем структуру директорий
+!media/.gitkeep
+!media/images/.gitkeep
+!media/videos/.gitkeep
+!media/edits/.gitkeep
+!media/face_swap/.gitkeep

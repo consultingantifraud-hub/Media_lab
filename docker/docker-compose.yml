@@ -45,7 +45,8 @@ services:
       - DATABASE_URL=sqlite:////app/db/media_lab_shared.db
     depends_on:
       - redis
-    command: rq worker -u redis://redis:6379/0 img_queue
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue
+    network_mode: host
     volumes:
       - ../media:/app/media
       - ../db:/app/db:rw

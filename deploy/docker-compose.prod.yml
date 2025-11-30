@@ -1,0 +1,632 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 4gb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - media-lab-network
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    env_file:
+      - ../.env
+    environment:
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    command: uvicorn app.web.api:app --host 0.0.0.0 --port 8000 --workers 4
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../media:/app/media
+      - api_logs:/app/logs
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - media-lab-network
+
+  bot:
+    image: deploy-bot:latest
+    env_file:
+      - ../.env
+    environment:
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    entrypoint: ["python"]
+    command: ["app/bot/main.py"]
+    volumes:
+      - ../media:/app/media
+      - ../app:/app/app
+      - ../assets:/app/assets
+      - bot_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('app/bot/main.py' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - media-lab-network
+
+  worker-image:
+    network_mode: host
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-1
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-1' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-2:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-2
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-2' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-3:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-3
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-3' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-4:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-4
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-4' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-5:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-5
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-5' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-6:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-6
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-6' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-7:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-7
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-7' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-8:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-8
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-8' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-9:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-9
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-9' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-10:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-10
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-10' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-11:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-11
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-11' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-12:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-12
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-12' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-13:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-13
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-13' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-14:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-14
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-14' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-image-15:
+    network_mode: host
+    image: deploy-worker-image:latest
+    env_file:
+      - ../.env
+    environment:
+      - REPLICATE_API_TOKEN=r8_PN3PYGiGgM93hhnjoh4JjtMpPudXwnz2w1aGL
+      - REPLICATE_FACE_SWAP_MODEL=codeplugtech/face-swap
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+      - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+      - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-15
+    volumes:
+      - ../app:/app/app
+      - ../media:/app/media
+      - worker_logs:/app/logs
+      - bot_db:/app
+      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('rq worker' in cmd and 'worker-image-15' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  redis_data:
+    driver: local
+  api_logs:
+    driver: local
+  bot_logs:
+    driver: local
+  bot_db:
+    driver: local
+  worker_logs:
+    driver: local
+
+networks:
+  media-lab-network:
+    driver: bridge
+

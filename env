@@ -1,0 +1,24 @@
+tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
+app_env=local
+api_host=0.0.0.0
+api_port=8000
+redis_url=redis://redis:6379/0
+fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
+fal_queue_base_url=https://queue.fal.run
+fal_standard_model=fal-ai/flux-pro/v1.1-ultra
+fal_premium_model=fal-ai/nano-banana
+fal_inpaint_model=fal-ai/flux-general/inpainting
+fal_edit_model=fal-ai/chrono-edit
+media_dir=./media
+
+# Easel AI settings for testing
+easel_ai_disable_compression=true
+easel_ai_gender_0=male
+easel_ai_workflow_type=user_hair
+easel_ai_min_face_size=384
+easel_ai_jpeg_quality=80
+
+WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
+WAVESPEED_FACE_SWAP_MODEL=wavespeed-ai/image-face-swap
+WAVESPEED_TEXT_MODEL=openai/gpt-image-1-mini/edit
+WAVESPEED_GPT_CREATE_MODEL=openai/gpt-image-1-mini

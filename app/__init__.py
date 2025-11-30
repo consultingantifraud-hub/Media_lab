@@ -1,0 +1,2 @@
+"""Telegram media generation service."""
+

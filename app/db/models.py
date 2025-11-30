@@ -64,7 +64,7 @@ class Balance(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
-    balance = Column(Integer, default=0, nullable=False)  # Balance in rubles
+    balance = Column(Integer, default=0, nullable=False)  # Balance in kopecks
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Relationships

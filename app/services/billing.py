@@ -90,7 +90,7 @@ class BillingService:
             
             # Create balance with 30 rubles starting bonus
             STARTING_BALANCE = 30
-            balance = Balance(user_id=user.id, balance=STARTING_BALANCE)
+            balance = Balance(user_id=user.id, balance=STARTING_BALANCE * 100)  # Store in kopecks
             db.add(balance)
             
             # Create user statistics
@@ -113,7 +113,7 @@ class BillingService:
 
     @staticmethod
     def get_user_balance(db: Session, user_id: int) -> int:
-        """Get user balance in rubles."""
+        """Get user balance in kopecks."""
         balance = db.query(Balance).filter(Balance.user_id == user_id).first()
         if not balance:
             return 0
@@ -201,10 +201,11 @@ class BillingService:
         # Convert price to kopecks (multiply by 100) for storage
         price_kopecks = int(round(price * 100))
         
-        # Check balance (but don't charge yet) - balance is in rubles, convert to kopecks for comparison
-        if balance.balance * 100 < price_kopecks:
+        # Check balance (but don't charge yet) - balance is in kopecks
+        if balance.balance < price_kopecks:
+            balance_rub = balance.balance / 100.0
             db.rollback()
-            return False, f"Insufficient balance. Need {price:.2f}₽, have {balance.balance}₽", None
+            return False, f"Insufficient balance. Need {price:.2f}₽, have {balance_rub:.2f}₽", None
 
         # Create PENDING operation (reserve, but don't charge yet)
         # Calculate original price if discount was applied
@@ -438,19 +439,20 @@ class BillingService:
             db.flush()
 
         # Check balance again (might have changed)
-        # operation.price is in kopecks, balance.balance is in rubles
-        price_rubles = operation.price / 100.0
-        if balance.balance < price_rubles:
+        # operation.price is in kopecks, balance.balance is in kopecks
+        if balance.balance < operation.price:
+            balance_rub = balance.balance / 100.0
+            price_rub = operation.price / 100.0
             logger.error(
                 f"Insufficient balance to confirm operation: "
-                f"operation_id={operation_id}, need={price_rubles:.2f}₽, have={balance.balance}₽"
+                f"operation_id={operation_id}, need={price_rub:.2f}₽, have={balance_rub:.2f}₽"
             )
             operation.status = OperationStatus.FAILED
             db.commit()
             return False
 
-        # Charge from balance (convert kopecks to rubles)
-        balance.balance -= price_rubles
+        # Charge from balance (both in kopecks)
+        balance.balance -= operation.price
         operation.status = OperationStatus.CHARGED
         db.commit()
         
@@ -484,10 +486,11 @@ class BillingService:
             logger.warning(f"Failed to sync database: {sync_error}", exc_info=True)
         
         price_rubles = operation.price / 100.0
+        balance_rub = balance.balance / 100.0
         logger.info(
             f"Confirmed and charged operation: operation_id={operation_id}, "
             f"type={operation.type}, price={price_rubles:.2f}₽ ({operation.price} kopecks), "
-            f"new_balance={balance.balance:.2f}₽"
+            f"new_balance={balance_rub:.2f}₽ ({balance.balance} kopecks)"
         )
         return True
 
@@ -578,11 +581,13 @@ class BillingService:
             db.add(balance)
             db.flush()
 
-        # Refund: operation.price is in kopecks, balance.balance is in rubles
-        balance.balance += operation.price / 100.0
+        # Refund: operation.price is in kopecks, balance.balance is in kopecks
+        balance.balance += operation.price
         operation.status = OperationStatus.REFUNDED
         db.commit()
-        logger.info(f"Refunded operation: operation_id={operation_id}, amount={operation.price}₽, new_balance={balance.balance}₽")
+        price_rub = operation.price / 100.0
+        balance_rub = balance.balance / 100.0
+        logger.info(f"Refunded operation: operation_id={operation_id}, amount={price_rub:.2f}₽, new_balance={balance_rub:.2f}₽")
         return True
 
     @staticmethod
@@ -599,9 +604,12 @@ class BillingService:
             db.add(balance)
             db.flush()
 
-        balance.balance += amount
+        # amount is in rubles, convert to kopecks
+        amount_kopecks = int(round(amount * 100))
+        balance.balance += amount_kopecks
         db.commit()
-        logger.info(f"Added balance: user_id={user_id}, amount={amount}₽, new_balance={balance.balance}₽")
+        balance_rub = balance.balance / 100.0
+        logger.info(f"Added balance: user_id={user_id}, amount={amount}₽, new_balance={balance_rub:.2f}₽")
         return True
 
     @staticmethod
@@ -618,9 +626,11 @@ class BillingService:
 
         balance = db.query(Balance).filter(Balance.user_id == user.id).first()
         balance_amount = balance.balance if balance else 0
+        # Convert kopecks to rubles for display
+        balance_rub = balance_amount / 100.0
 
         return {
-            "balance": balance_amount,
+            "balance": balance_rub,
             "free_operations_left": 0,  # Deprecated: no longer used
             "free_operations_total": 0,  # Deprecated: no longer used
             "has_free_access": user.has_free_access,

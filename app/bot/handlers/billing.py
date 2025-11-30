@@ -560,8 +560,8 @@ async def callback_balance_close(callback: CallbackQuery):
 @router.callback_query(F.data == "balance_menu")
 async def callback_balance_menu(callback: CallbackQuery):
     """Show balance menu."""
+    await callback.answer()  # Answer callback first to prevent timeout
     await show_balance(callback.message)
-    await callback.answer()
 
 
 @router.callback_query(F.data == "operations_history")
@@ -915,43 +915,70 @@ async def process_operation_discount_code(message: Message, state: FSMContext):
             await message.answer(f"❌ {error_msg}")
             return
 
-        # Store discount code in database for persistence across restarts
-        user.operation_discount_code_id = discount.id
-        user.operation_discount_percent = discount.discount_percent
-        db.commit()
-        
-        # Also store in state for immediate use
-        await state.update_data(
-            operation_discount_code=code,
-            operation_discount_id=discount.id,
-            operation_discount_percent=discount.discount_percent
-        )
-        
-        user_info = BillingService.get_user_info(db, message.from_user.id)
-        balance = user_info["balance"] if user_info else 0
+        # Handle FREE_ACCESS code separately (activates unlimited free operations)
+        if code == "FREE_ACCESS":
+            success, error_msg = DiscountService.activate_free_access(db, discount, user.id)
+            if not success:
+                await message.answer(f"❌ {error_msg}")
+                return
+            
+            user_info = BillingService.get_user_info(db, message.from_user.id)
+            balance = user_info["balance"] if user_info else 0
+            
+            text = (
+                f"✅ **Промокод FREE_ACCESS активирован!**\n\n"
+                f"🎟️ Промокод: {code}\n"
+                f"✨ **Бесплатный доступ:** Активен\n\n"
+                f"💡 Все операции теперь бесплатны!\n\n"
+                f"💰 **Ваш баланс:** {format_balance(balance)} ₽"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💰 Баланс",
+                        callback_data="payment_menu"
+                    )
+                ]
+            ])
+        else:
+            # Store discount code in database for persistence across restarts
+            user.operation_discount_code_id = discount.id
+            user.operation_discount_percent = discount.discount_percent
+            db.commit()
+            
+            # Also store in state for immediate use
+            await state.update_data(
+                operation_discount_code=code,
+                operation_discount_id=discount.id,
+                operation_discount_percent=discount.discount_percent
+            )
+            
+            user_info = BillingService.get_user_info(db, message.from_user.id)
+            balance = user_info["balance"] if user_info else 0
 
-        text = (
-            f"✅ **Промокод применен к операциям!**\n\n"
-            f"🎟️ Промокод: {code}\n"
-            f"💰 Скидка: {discount.discount_percent}%\n\n"
-            f"💡 Промокод будет применяться ко всем операциям до отмены.\n\n"
-            f"💰 **Ваш баланс:** {balance} ₽"
-        )
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="❌ Отменить промокод",
-                    callback_data="operation_discount_remove"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💰 Баланс",
-                    callback_data="balance_menu"
-                )
-            ]
-        ])
+            text = (
+                f"✅ **Промокод применен к операциям!**\n\n"
+                f"🎟️ Промокод: {code}\n"
+                f"💰 Скидка: {discount.discount_percent}%\n\n"
+                f"💡 Промокод будет применяться ко всем операциям до отмены.\n\n"
+                f"💰 **Ваш баланс:** {format_balance(balance)} ₽"
+            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отменить промокод",
+                        callback_data="operation_discount_remove"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="💰 Баланс",
+                        callback_data="payment_menu"
+                    )
+                ]
+            ])
         
         await message.answer(
             text,

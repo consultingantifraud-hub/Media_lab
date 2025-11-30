@@ -23,6 +23,32 @@ services:
     networks:
       - media-lab-network
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: media_lab
+      POSTGRES_USER: media_lab_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-media_lab_password_change_me}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media_lab_user -d media_lab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - media-lab-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
   api:
     build:
       context: ..
@@ -65,9 +91,11 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@postgres:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     entrypoint: ["python"]
@@ -78,7 +106,6 @@ services:
       - ../assets:/app/assets
       - bot_logs:/app/logs
       - bot_db:/app
-      - /tmp/media_lab_shared.db:/tmp/media_lab_shared.db:rw
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os; procs = [d for d in os.listdir('/proc') if d.isdigit()]; cmdlines = [open(f'/proc/{p}/cmdline', 'rb').read().decode('utf-8', errors='ignore').replace(chr(0), ' ') for p in procs[:20] if os.path.exists(f'/proc/{p}/cmdline')]; found = any('app/bot/main.py' in cmd for cmd in cmdlines); exit(0 if found else 1)\""]
@@ -101,11 +128,11 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-1
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -136,7 +163,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -171,7 +198,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -206,7 +233,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -241,7 +268,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -276,7 +303,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -311,7 +338,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -346,7 +373,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -381,7 +408,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -416,11 +443,11 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue0
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-10
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -451,11 +478,11 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue1
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-11
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -486,11 +513,11 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue2
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-12
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -521,11 +548,11 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue3
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-13
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -556,7 +583,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -591,7 +618,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
-      - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - DATABASE_URL=postgresql://media_lab_user:${POSTGRES_PASSWORD:-media_lab_password_change_me}@127.0.0.1:5432/media_lab
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
@@ -617,6 +644,8 @@ services:
 
 volumes:
   redis_data:
+    driver: local
+  postgres_data:
     driver: local
   api_logs:
     driver: local

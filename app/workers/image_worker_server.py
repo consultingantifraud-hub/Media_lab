@@ -1428,27 +1428,10 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
 
         # Confirm operation after successful completion
         if operation_id:
-            # Всегда используем общую БД для подтверждения операций
-            # Это гарантирует, что мы видим операции, созданные ботом
-            from app.db.base import create_engine, sessionmaker, DATABASE_URL
-            # Используем DATABASE_URL из настроек, если он указывает на общую БД
-            if DATABASE_URL.startswith("sqlite:///"):
-                shared_db_path = DATABASE_URL.replace("sqlite:///", "")
-            else:
-                # Fallback на старый путь для обратной совместимости
-                shared_db_path = "/app/db/media_lab_shared.db"
-            
-            # Создаем новое подключение к общей БД
-            engine = create_engine(
-                f"sqlite:///{shared_db_path}",
-                connect_args={"check_same_thread": False},
-                echo=False,
-            )
-            SessionLocalShared = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-            db = SessionLocalShared()
-            
+            # Используем DATABASE_URL из настроек (PostgreSQL или SQLite)
+            db = SessionLocal()
             try:
-                logger.info("Confirming operation {} for job {}: using shared database {}", operation_id, job_id, shared_db_path)
+                logger.info("Confirming operation {} for job {}: using DATABASE_URL from settings", operation_id, job_id)
                 
                 # Проверяем, существует ли операция перед подтверждением
                 from app.db.models import Operation
@@ -1457,7 +1440,7 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                     logger.info("Operation {} found: status={}, type={}, user_id={}", 
                                operation_id, operation_check.status, operation_check.type, operation_check.user_id)
                 else:
-                    logger.warning("Operation {} not found in shared database, will try to confirm anyway", operation_id)
+                    logger.warning("Operation {} not found in database, will try to confirm anyway", operation_id)
                 
                 success = BillingService.confirm_operation(db, operation_id)
                 if success:

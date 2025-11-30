@@ -588,18 +588,15 @@ def process_face_swap_job(
             # Проверяем API ключ из переменной окружения напрямую, если в настройках его нет
             wavespeed_api_key = current_settings.wavespeed_api_key or os.getenv("WAVESPEED_API_KEY")
             if not wavespeed_api_key:
-                error_msg = (
-                    "❌ Сервис WaveSpeed Face Swap временно недоступен.\n\n"
-                    "Попробуйте использовать базовую модель «🔄 Face Swap» или обратитесь в техническую поддержку."
-                )
-                logger.error("Face swap job {}: WaveSpeedAI API key not configured (env: {}, settings: {})", 
+                # Автоматически переключаемся на базовую модель Fal.ai, если ключ WaveSpeedAI не настроен
+                logger.warning("Face swap job {}: WaveSpeedAI API key not configured (env: {}, settings: {}), falling back to Fal.ai model", 
                             job_id, os.getenv("WAVESPEED_API_KEY"), current_settings.wavespeed_api_key)
-                if job:
-                    job.meta["error"] = error_msg
-                    job.save_meta()
-                if notify_options.get("chat_id"):
-                    _send_failure_notification_sync(notify_options, job_id, error_msg)
-                raise RuntimeError("WaveSpeedAI API key not configured")
+                logger.info("Face swap job {}: Switching from WaveSpeedAI model '{}' to Fal.ai model '{}'", 
+                           job_id, model_name, current_settings.fal_face_swap_model)
+                # Переключаемся на базовую модель
+                model_name = current_settings.fal_face_swap_model
+                is_advanced_model = False
+                # Продолжаем выполнение с базовой моделью Fal.ai
 
             logger.info("Face swap job {} using WaveSpeedAI for advanced model", job_id)
             try:
@@ -611,20 +608,14 @@ def process_face_swap_job(
                     model=current_settings.wavespeed_face_swap_model,  # Явно передаем модель из настроек
                 )
                 logger.info("Face swap job {} successfully completed via WaveSpeedAI: {}", job_id, result_url[:50])
-                # Скачиваем результат
+                # Скачиваем результат напрямую в PNG (API должен вернуть PNG благодаря параметру output_format)
+                # Убеждаемся, что output_file имеет расширение .png
+                if output_file.suffix.lower() != ".png":
+                    output_file = output_file.with_suffix(".png")
+                    logger.debug("Face swap job {}: ensuring output file has .png extension: {}", job_id, output_file)
+                
                 _download_file_with_retry(result_url, output_file.as_posix())
-
-                # Определяем расширение файла на основе URL (WaveSpeedAI возвращает .jpeg или .png)
-                # Если URL содержит .jpeg или .jpg, меняем расширение output_file
-                if ".jpeg" in result_url.lower() or ".jpg" in result_url.lower():
-                    # Меняем расширение на .jpg для JPEG файлов
-                    output_file_jpeg = output_file.with_suffix(".jpg")
-                    if output_file != output_file_jpeg:
-                        # Переименовываем файл, если расширение отличается
-                        if output_file.exists():
-                            output_file.rename(output_file_jpeg)
-                            output_file = output_file_jpeg
-                            logger.debug("Face swap job {}: renamed output file to {}", job_id, output_file)
+                logger.info("Face swap job {}: downloaded result as PNG ({} bytes)", job_id, output_file.stat().st_size if output_file.exists() else 0)
 
                 # Отправляем результат в Telegram
                 if notify_options.get("chat_id"):
@@ -1945,7 +1936,7 @@ def process_retoucher_job(
         
         if is_nano_banana_edit_enhance:
             # Применяем настройки качества для Nano Banana edit (обычный)
-            provider_options.setdefault("num_inference_steps", 60)
+            provider_options.setdefault("num_inference_steps", 90)
             provider_options.setdefault("guidance_scale", 9.0)
             logger.info("Retoucher job {}: Using synchronous mode for Nano Banana edit with quality settings: num_inference_steps={}, guidance_scale={}", 
                        job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
@@ -2089,53 +2080,23 @@ def process_retoucher_job(
                         _send_failure_notification_sync(notify_options, job_id, error)
                     raise RuntimeError(error)
 
-                # Небольшая задержка после завершения, чтобы API успел подготовить результат
+                # Короткая задержка после завершения, чтобы API успел подготовить результат (как в Smart Merge)
                 time.sleep(0.5)
-
-                # Получаем результат с повторными попытками
-                max_result_attempts = 3
-                result_delay = 0.5
-                last_result_error: Exception | None = None
-
-                for result_attempt in range(max_result_attempts):
-                    try:
-                        asset = resolve_image_asset(result_url)
-                        logger.info("Retoucher job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
-                                   job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
-                        break
-                    except httpx.HTTPStatusError as exc:
-                        last_result_error = exc
-                        status_code = exc.response.status_code
-                        if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
-                            logger.warning(
-                                "Retoucher job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
-                                job_id,
-                                result_attempt + 1,
-                                status_code,
-                                exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
-                                result_delay,
-                            )
-                            time.sleep(result_delay)
-                            result_delay *= 1.5
-                            continue
-                        else:
-                            logger.error("Retoucher job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
-                            raise
-                    except Exception as exc:  # noqa: BLE001
-                        last_result_error = exc
-                        logger.error("Retoucher job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
-                        if result_attempt >= max_result_attempts - 1:
-                            raise
-
-                if asset is None:
-                    error = last_result_error or RuntimeError("Failed to get retoucher result")
-                    logger.error("Retoucher job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
+                
+                # Получаем результат одним быстрым вызовом (как в Smart Merge), без повторных попыток
+                try:
+                    asset = resolve_image_asset(result_url)
+                    logger.info("Retoucher job {} successfully got result: asset.url={}, asset.content={}", 
+                               job_id, asset.url[:100] if asset.url else "None", asset.content is not None)
+                except Exception as exc:  # noqa: BLE001
+                    error = f"Не удалось получить результат ретуши: {exc}"
+                    logger.error("Retoucher job {} failed to get result: {}", job_id, exc)
                     if job:
-                        job.meta["error"] = str(error)
+                        job.meta["error"] = str(exc)
                         job.save_meta()
                     if notify_options.get("chat_id"):
-                        _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
-                    raise RuntimeError(str(error))
+                        _send_failure_notification_sync(notify_options, job_id, error)
+                    raise RuntimeError(error)
 
         # Проверяем, что asset был успешно получен
         if asset is None:
@@ -2158,20 +2119,20 @@ def process_retoucher_job(
         saved_path = None
         
         if is_soft_mode:
-            # Асинхронный режим для мягкой ретуши - точно как у Nano Banana create
-            # Отправляем по URL сразу, скачивание идет в фоне
+            # Асинхронный режим для мягкой ретуши - точно как у Nano Banana Smart Merge
+            # Отправляем по URL сразу, БЕЗ скачивания (как в Smart Merge)
             if image_bytes is not None:
                 # Изображение уже в памяти - сохраняем синхронно (быстро)
                 saved_path = _persist_asset(asset, output_file.as_posix())
                 logger.info("Retoucher job {} (soft mode): saving from memory ({} bytes) - no download needed", 
                            job_id, len(image_bytes))
             elif image_url:
-                # Для всех моделей используем асинхронное скачивание
-                # Отправляем по URL сразу, скачивание идет в фоне
-                logger.info("🔄 Retoucher job {} (soft mode): ASYNC MODE - sending by URL immediately, download in background", job_id)
+                # Для всех моделей отправляем по URL сразу (как в Smart Merge)
+                # НЕ скачиваем файл - Telegram скачает сам, это быстрее
+                logger.info("🔄 Retoucher job {} (soft mode): Sending by URL immediately (no download, like Smart Merge)", job_id)
                 saved_path = None
-                # Планируем фоновое скачивание для кеширования
-                _schedule_result_download(job_id, image_url, output_file)
+                # НЕ планируем фоновое скачивание - это замедляет выполнение
+                # Фоновое скачивание занимает время и не нужно для немедленной отправки
         else:
             # Синхронный режим для enhance - скачиваем файл перед отправкой
             if image_bytes is not None:
@@ -2236,10 +2197,9 @@ def process_retoucher_job(
                         reply_markup=reply_markup,
                     )
                 elif image_url:
-                    # Для всех моделей с асинхронным скачиванием отправляем по URL напрямую
-                    # Это избегает двойного скачивания (асинхронное уже запущено для кеширования)
-                    # Telegram скачает файл сам, а мы кешируем его в фоне
-                    logger.info("📤 Sending by URL directly (async download in background, no duplicate download): {}", image_url[:100] if image_url else "None")
+                    # Для всех моделей отправляем по URL напрямую (как в Smart Merge)
+                    # Telegram скачает файл сам - это быстрее, чем скачивать на сервере
+                    logger.info("📤 Sending by URL directly (no download, Telegram will download, like Smart Merge): {}", image_url[:100] if image_url else "None")
                     _send_success_notification_sync(
                         notify_options,
                         job_id,
@@ -2349,8 +2309,8 @@ def process_smart_merge_job(
     
     if is_nano_banana_regular:
         # Увеличиваем параметры качества для максимального результата (обычный nano-banana)
-        provider_options["num_inference_steps"] = 60
-        provider_options["guidance_scale"] = 9.0
+        provider_options["num_inference_steps"] = 90
+        provider_options["guidance_scale"] = 11.0
         logger.info("Smart merge job {}: Applied quality settings for nano-banana: num_inference_steps={}, guidance_scale={}", 
                    job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
     elif is_nano_banana_pro:
@@ -2960,7 +2920,7 @@ def process_image_upscale_job(
                     job.meta["error"] = error
                     job.save_meta()
                 if notify_options.get("chat_id"):
-                        _send_failure_notification_sync(notify_options, job_id, f"Улучшение изображения не удалось: {error}")
+                    _send_failure_notification_sync(notify_options, job_id, f"Улучшение изображения не удалось: {error}")
                 # Mark operation as failed on error
                 if operation_id:
                     db = SessionLocal()
@@ -2973,10 +2933,11 @@ def process_image_upscale_job(
                         db.close()
                 raise RuntimeError(error)
 
-                # According to fal.ai docs, when status is COMPLETED, the result may be in the status response itself
-                # or available via response_url. Let's check if result is already in status first.
-                from app.providers.fal.images import _extract_image_url as extract_image_url
-                status_image_url = extract_image_url(status)
+        # After the while loop, status is either "succeeded" or "failed"
+        # According to fal.ai docs, when status is COMPLETED, the result may be in the status response itself
+        # or available via response_url. Let's check if result is already in status first.
+        from app.providers.fal.images import _extract_image_url as extract_image_url
+        status_image_url = extract_image_url(status)
         logger.debug("Upscale job {} extracted URL from status: {}", job_id, status_image_url[:100] if status_image_url else "None")
         asset = None
 
@@ -3016,116 +2977,126 @@ def process_image_upscale_job(
                     _send_failure_notification_sync(notify_options, job_id, "Задача завершена, но результат недоступен.")
                 raise RuntimeError(error)
 
-                # Small delay after completion to allow API to prepare the result
-                # Sometimes the API returns 500 immediately after COMPLETED status
-                logger.debug("Upscale job {} task {} completed, waiting 1s before fetching result", job_id, task_id)
-                time.sleep(1.0)
+            # Small delay after completion to allow API to prepare the result
+            # Sometimes the API returns 500 immediately after COMPLETED status
+            logger.debug("Upscale job {} task {} completed, waiting 1s before fetching result", job_id, task_id)
+            time.sleep(1.0)
 
-                # Try to get result with retries and increasing delays
-                # Use resolve_image_asset which properly handles authorization and retries
-                max_result_attempts = 5
-                result_delay = 1.0
-                last_result_error: Exception | None = None
-                api_file_size: int | None = None  # Store file_size from API response
+            # Try to get result with retries and increasing delays
+            # Use resolve_image_asset which properly handles authorization and retries
+            max_result_attempts = 5
+            result_delay = 1.0
+            last_result_error: Exception | None = None
+            api_file_size: int | None = None  # Store file_size from API response
 
-                for result_attempt in range(max_result_attempts):
-                    try:
-                        logger.debug("Upscale job {} attempt {} to get result from {}", job_id, result_attempt + 1, result_url)
+            for result_attempt in range(max_result_attempts):
+                try:
+                    logger.debug("Upscale job {} attempt {} to get result from {}", job_id, result_attempt + 1, result_url)
 
-                        # Try to extract file_size from API response before calling resolve_image_asset
-                        from app.providers.fal.images import _parse_result_url
+                    # Try to extract file_size from API response before calling resolve_image_asset
+                    from app.providers.fal.images import _parse_result_url
+                    from app.providers.fal.client import queue_result
+                    parsed = _parse_result_url(result_url)
+                    if parsed:
+                        model_path, request_id = parsed
+                        try:
+                            response_data = queue_result(model_path, request_id)
+                            if isinstance(response_data, dict):
+                                # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
+                                if 'image' in response_data and isinstance(response_data['image'], dict):
+                                    extracted_size = response_data['image'].get('file_size')
+                                    if extracted_size:
+                                        api_file_size = extracted_size
+                                        logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
+                                                   job_id, api_file_size, api_file_size / (1024 * 1024))
+                                elif 'file_size' in response_data:
+                                    extracted_size = response_data.get('file_size')
+                                    if extracted_size:
+                                        api_file_size = extracted_size
+                                        logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
+                                                   job_id, api_file_size, api_file_size / (1024 * 1024))
+                        except Exception as size_extract_exc:  # noqa: BLE001
+                            logger.debug("Upscale job {}: could not extract file_size from API response: {}", job_id, size_extract_exc)
+
+                    # Use resolve_image_asset which properly handles queue API authorization
+                    asset = resolve_image_asset(result_url)
+                    logger.info("Upscale job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
+                               job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
+                    # Check if asset.url is a queue API endpoint - if so, we need to get the actual image URL
+                    if asset.url and (asset.url.startswith("https://queue.fal.run") or asset.url.startswith("http://queue.fal.run")):
+                        logger.warning("Upscale job {} asset.url is a queue API endpoint, this should not happen. asset.url={}", 
+                                      job_id, asset.url)
+                        # Try to get the actual result from queue_result
                         from app.providers.fal.client import queue_result
+                        from app.providers.fal.images import _extract_image_url, ImageAsset, _parse_result_url
                         parsed = _parse_result_url(result_url)
                         if parsed:
                             model_path, request_id = parsed
-                            try:
-                                response_data = queue_result(model_path, request_id)
-                                if isinstance(response_data, dict):
-                                    # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
-                                    if 'image' in response_data and isinstance(response_data['image'], dict):
-                                        extracted_size = response_data['image'].get('file_size')
-                                        if extracted_size:
-                                            api_file_size = extracted_size
-                                            logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
-                                                       job_id, api_file_size, api_file_size / (1024 * 1024))
-                                    elif 'file_size' in response_data:
-                                        extracted_size = response_data.get('file_size')
-                                        if extracted_size:
-                                            api_file_size = extracted_size
-                                            logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
-                                                       job_id, api_file_size, api_file_size / (1024 * 1024))
-                            except Exception as size_extract_exc:  # noqa: BLE001
-                                logger.debug("Upscale job {}: could not extract file_size from API response: {}", job_id, size_extract_exc)
-
-                        # Use resolve_image_asset which properly handles queue API authorization
-                        asset = resolve_image_asset(result_url)
-                        logger.info("Upscale job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
-                                   job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
-                        # Check if asset.url is a queue API endpoint - if so, we need to get the actual image URL
-                        if asset.url and (asset.url.startswith("https://queue.fal.run") or asset.url.startswith("http://queue.fal.run")):
-                            logger.warning("Upscale job {} asset.url is a queue API endpoint, this should not happen. asset.url={}", 
-                                          job_id, asset.url)
-                            # Try to get the actual result from queue_result
-                            from app.providers.fal.client import queue_result
-                            from app.providers.fal.images import _extract_image_url, ImageAsset, _parse_result_url
-                            parsed = _parse_result_url(result_url)
-                            if parsed:
-                                model_path, request_id = parsed
-                                logger.info("Upscale job {} trying queue_result directly for model={}, request_id={}", 
-                                           job_id, model_path, request_id)
-                                response_data = queue_result(model_path, request_id)
-                                logger.info("Upscale job {} queue_result response keys: {}", job_id, list(response_data.keys()) if isinstance(response_data, dict) else "not a dict")
-                                actual_image_url = _extract_image_url(response_data)
-                                # Try to extract file_size from response_data
-                                if isinstance(response_data, dict):
-                                    # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
-                                    if 'image' in response_data and isinstance(response_data['image'], dict):
-                                        api_file_size = response_data['image'].get('file_size')
-                                    elif 'file_size' in response_data:
-                                        api_file_size = response_data['file_size']
-                                    if api_file_size:
-                                        logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
-                                                   job_id, api_file_size, api_file_size / (1024 * 1024))
-                                if actual_image_url and not (actual_image_url.startswith("https://queue.fal.run") or actual_image_url.startswith("http://queue.fal.run")):
-                                    logger.info("Upscale job {} extracted actual image URL: {}", job_id, actual_image_url[:100])
-                                    asset = ImageAsset(url=actual_image_url, content=None, filename=None)
-                                else:
-                                    logger.error("Upscale job {} failed to extract valid image URL from queue_result response", job_id)
-                        break
-                    except Exception as exc:  # noqa: BLE001
-                        last_result_error = exc
-                        # Check if it's an HTTP error that we can retry
-                        if isinstance(exc, httpx.HTTPStatusError):
-                            status_code = exc.response.status_code
-                            if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
-                                logger.warning(
-                                    "Upscale job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
-                                    job_id,
-                                    result_attempt + 1,
-                                    status_code,
-                                    exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
-                                    result_delay,
-                                )
-                                time.sleep(result_delay)
-                                result_delay *= 1.5
-                                continue
+                            logger.info("Upscale job {} trying queue_result directly for model={}, request_id={}", 
+                                       job_id, model_path, request_id)
+                            response_data = queue_result(model_path, request_id)
+                            logger.info("Upscale job {} queue_result response keys: {}", job_id, list(response_data.keys()) if isinstance(response_data, dict) else "not a dict")
+                            actual_image_url = _extract_image_url(response_data)
+                            # Try to extract file_size from response_data
+                            if isinstance(response_data, dict):
+                                # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
+                                if 'image' in response_data and isinstance(response_data['image'], dict):
+                                    api_file_size = response_data['image'].get('file_size')
+                                elif 'file_size' in response_data:
+                                    api_file_size = response_data['file_size']
+                                if api_file_size:
+                                    logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
+                                               job_id, api_file_size, api_file_size / (1024 * 1024))
+                            if actual_image_url and not (actual_image_url.startswith("https://queue.fal.run") or actual_image_url.startswith("http://queue.fal.run")):
+                                logger.info("Upscale job {} extracted actual image URL: {}", job_id, actual_image_url[:100])
+                                asset = ImageAsset(url=actual_image_url, content=None, filename=None)
                             else:
-                                logger.error("Upscale job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
-                                raise
+                                logger.error("Upscale job {} failed to extract valid image URL from queue_result response", job_id)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_result_error = exc
+                    # Check if it's an HTTP error that we can retry
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        status_code = exc.response.status_code
+                        if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
+                            logger.warning(
+                                "Upscale job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
+                                job_id,
+                                result_attempt + 1,
+                                status_code,
+                                exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
+                                result_delay,
+                            )
+                            time.sleep(result_delay)
+                            result_delay *= 1.5
+                            continue
                         else:
-                            logger.error("Upscale job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
-                            if result_attempt >= max_result_attempts - 1:
-                                raise
+                            logger.error("Upscale job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
+                            raise
+                    else:
+                        logger.error("Upscale job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
+                        if result_attempt >= max_result_attempts - 1:
+                            raise
 
         if asset is None:
-            error = last_result_error or RuntimeError("Failed to get upscale result")
-            logger.error("Upscale job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
+            error_msg = str(last_result_error) if last_result_error else "Failed to get upscale result"
+            logger.error("Upscale job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error_msg)
             if job:
-                job.meta["error"] = str(error)
+                job.meta["error"] = error_msg
                 job.save_meta()
             if notify_options.get("chat_id"):
-                _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
-            raise RuntimeError(str(error))
+                _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error_msg}")
+            # Mark operation as failed
+            if operation_id:
+                db = SessionLocal()
+                try:
+                    BillingService.fail_operation(db, operation_id)
+                    logger.info("Marked operation {} as failed for upscale job {} due to error", operation_id, job_id)
+                except Exception as fail_error:
+                    logger.error("Error failing operation {} for upscale job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+                finally:
+                    db.close()
+            raise RuntimeError(error_msg)
 
         if asset is None:
             raise RuntimeError("fal upscale did not return an asset")

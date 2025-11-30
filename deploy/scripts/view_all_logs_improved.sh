@@ -3,10 +3,8 @@
 # Использует docker logs с параллельным выводом в реальном времени
 # Оптимизирован для работы через SSH без обрывов
 
-# Список возможных контейнеров
 CONTAINERS=(
     "deploy-bot-1"
-    "docker-worker-image-1"
     "deploy-worker-image-1"
     "deploy-worker-image-2-1"
     "deploy-worker-image-3-1"
@@ -22,51 +20,25 @@ CONTAINERS=(
     "deploy-worker-image-13-1"
     "deploy-worker-image-14-1"
     "deploy-worker-image-15-1"
+    "docker-worker-image-1"
+    "docker-worker-image-2"
+    "docker-worker-image-3"
+    "docker-worker-image-4"
+    "docker-worker-image-5"
     "deploy-api-1"
     "deploy-redis-1"
 )
 
-# Автоматически определяем запущенные контейнеры
-RUNNING=()
-# Сначала добавляем известные контейнеры
-for container in "${CONTAINERS[@]}"; do
-    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
-        RUNNING+=("$container")
-    fi
-done
-
-# Также ищем все контейнеры с именами, содержащими worker, bot, api, redis
-ALL_CONTAINERS=$(docker ps --format '{{.Names}}' | grep -E '(bot|worker|api|redis)' || true)
-while IFS= read -r container; do
-    if [[ -n "$container" ]] && [[ ! " ${RUNNING[@]} " =~ " ${container} " ]]; then
-        RUNNING+=("$container")
-    fi
-done <<< "$ALL_CONTAINERS"
-
-if [ ${#RUNNING[@]} -eq 0 ]; then
-    echo "Не найдены запущенные контейнеры"
-    exit 1
-fi
-
 # Парсим аргументы
 FILTER_DOWNLOAD=false
-FILTER_WORKER=false
-WORKER_ONLY=false
 TAIL_LINES=50
 FOLLOW_MODE=true
+WORKER_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --download|-d)
             FILTER_DOWNLOAD=true
-            shift
-            ;;
-        --worker|-w)
-            FILTER_WORKER=true
-            shift
-            ;;
-        --worker-only|-wo)
-            WORKER_ONLY=true
             shift
             ;;
         --tail|-t)
@@ -77,15 +49,23 @@ while [[ $# -gt 0 ]]; do
             FOLLOW_MODE=false
             shift
             ;;
+        --worker|-w)
+            WORKER_ONLY=true
+            shift
+            ;;
+        --worker-only)
+            WORKER_ONLY=true
+            shift
+            ;;
         --help|-h)
             echo "Использование: $0 [OPTIONS]"
             echo ""
             echo "Опции:"
             echo "  --download, -d          Показывать только логи скачивания"
-            echo "  --worker, -w            Показывать только логи воркера (фильтр)"
-            echo "  --worker-only, -wo      Показывать только воркер (без других контейнеров)"
             echo "  --tail N, -t N          Показать последние N строк перед follow (по умолчанию: 50)"
             echo "  --no-follow, -n         Не следовать за логами (только показать последние строки)"
+            echo "  --worker, -w            Показывать только логи воркеров"
+            echo "  --worker-only           Показывать только логи воркеров"
             echo "  --help, -h              Показать эту справку"
             echo ""
             exit 0
@@ -98,19 +78,48 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Фильтруем контейнеры, если указан --worker-only
-if [ "$WORKER_ONLY" = true ]; then
-    WORKER_CONTAINERS=()
-    for container in "${RUNNING[@]}"; do
-        if echo "$container" | grep -qE "(worker|Worker)"; then
-            WORKER_CONTAINERS+=("$container")
-        fi
-    done
-    if [ ${#WORKER_CONTAINERS[@]} -eq 0 ]; then
-        echo "Не найдены контейнеры воркеров"
-        exit 1
+# Проверяем запущенные контейнеры
+RUNNING=()
+for container in "${CONTAINERS[@]}"; do
+    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+        RUNNING+=("$container")
     fi
-    RUNNING=("${WORKER_CONTAINERS[@]}")
+done
+
+# Автоматически находим все контейнеры с "worker" в имени, если включен фильтр воркеров
+if [ "$WORKER_ONLY" = true ]; then
+    WORKER_CONTAINERS=$(docker ps --format '{{.Names}}' | grep -i worker || true)
+    RUNNING=()
+    while IFS= read -r container; do
+        if [[ -n "$container" ]]; then
+            RUNNING+=("$container")
+        fi
+    done <<< "$WORKER_CONTAINERS"
+fi
+
+# Если не найден ни один контейнер, пытаемся найти автоматически
+if [ ${#RUNNING[@]} -eq 0 ]; then
+    if [ "$WORKER_ONLY" = true ]; then
+        WORKER_CONTAINERS=$(docker ps --format '{{.Names}}' | grep -i worker || true)
+        while IFS= read -r container; do
+            if [[ -n "$container" ]]; then
+                RUNNING+=("$container")
+            fi
+        done <<< "$WORKER_CONTAINERS"
+    else
+        # Ищем все контейнеры с bot, worker, api, redis
+        ALL_CONTAINERS=$(docker ps --format '{{.Names}}' | grep -E '(bot|worker|api|redis)' || true)
+        while IFS= read -r container; do
+            if [[ -n "$container" ]]; then
+                RUNNING+=("$container")
+            fi
+        done <<< "$ALL_CONTAINERS"
+    fi
+fi
+
+if [ ${#RUNNING[@]} -eq 0 ]; then
+    echo "Не найдены запущенные контейнеры"
+    exit 1
 fi
 
 # Проверяем аргументы для фильтрации
@@ -118,24 +127,10 @@ if [ "$FILTER_DOWNLOAD" = true ]; then
     echo "📥 Режим мониторинга скачивания включен"
 fi
 
-if [ "$FILTER_WORKER" = true ]; then
-    echo "🔧 Режим мониторинга воркера включен (фильтр по ключевым словам)"
-fi
-
-if [ "$WORKER_ONLY" = true ]; then
-    echo "🔧 Показываем только воркеры: ${RUNNING[*]}"
-else
-    echo "Просмотр логов: ${RUNNING[*]}"
-fi
-
+echo "Просмотр логов: ${RUNNING[*]}"
 if [ "$FILTER_DOWNLOAD" = true ]; then
     echo "Фильтр: только логи скачивания (DOWNLOAD, ASYNC, SYNC, SCHEDULING)"
 fi
-
-if [ "$FILTER_WORKER" = true ]; then
-    echo "Фильтр: только логи воркера (POLLING, Image job, process_image_job, operation_id, Confirmed operation)"
-fi
-
 if [ "$FOLLOW_MODE" = true ]; then
     echo "Режим: реальное время (последние $TAIL_LINES строк + follow)"
     echo "Нажмите Ctrl+C для остановки"
@@ -199,27 +194,11 @@ filter_download() {
     fi
 }
 
-# Функция для фильтрации логов воркера (без буферизации)
-filter_worker() {
-    if [ "$FILTER_WORKER" = true ]; then
-        # Используем stdbuf для немедленного вывода
-        if command -v stdbuf >/dev/null 2>&1; then
-            stdbuf -oL -eL grep -E "POLLING|📡|Image job|process_image_job|process_smart_merge|process_face_swap|process_image_edit|operation_id|Confirmed operation|Reserved operation|reserve_operation|confirm_operation|Job OK|Job Failed|Worker|Listening on|Subscribing to|img_queue|vid_queue|ERROR|Exception|Traceback|WARNING|SUCCESS"
-        else
-            grep --line-buffered -E "POLLING|📡|Image job|process_image_job|process_smart_merge|process_face_swap|process_image_edit|operation_id|Confirmed operation|Reserved operation|reserve_operation|confirm_operation|Job OK|Job Failed|Worker|Listening on|Subscribing to|img_queue|vid_queue|ERROR|Exception|Traceback|WARNING|SUCCESS"
-        fi
-    else
-        cat
-    fi
-}
-
 # Запускаем логи для каждого контейнера в фоне
 PIDS=()
 for container in "${RUNNING[@]}"; do
     if [ "$FILTER_DOWNLOAD" = true ]; then
         log_container "$container" | filter_download &
-    elif [ "$FILTER_WORKER" = true ]; then
-        log_container "$container" | filter_worker &
     else
         log_container "$container" &
     fi

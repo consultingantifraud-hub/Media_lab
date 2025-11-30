@@ -66,6 +66,7 @@ services:
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
       - DATABASE_URL=sqlite:////tmp/media_lab_shared.db
+      - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
     depends_on:
       redis:
         condition: service_healthy
@@ -104,7 +105,7 @@ services:
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-1
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -419,7 +420,7 @@ services:
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-10
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue0
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -454,7 +455,7 @@ services:
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-11
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue1
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -489,7 +490,7 @@ services:
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-12
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue2
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -524,7 +525,7 @@ services:
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-13
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue3
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -559,7 +560,7 @@ services:
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-14
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue4
     volumes:
       - ../app:/app/app
       - ../media:/app/media
@@ -594,7 +595,7 @@ services:
       - WAVESPEED_API_KEY=1bf256d1bb21967dc046a20654cd5b49cf6c483195df4a09eb5044ef422f0057
       - tg_bot_token=8419650536:AAGb_Fs570HOuA2Qi-4sPUlCQWJIYel63_U
       - fal_api_key=e6639496-c713-47d3-9d8c-d44cc8e3d606:829c2c62890898837a824b68a073ae83
-    command: rq worker -u redis://127.0.0.1:6379/0 img_queue --name worker-image-15
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue5
     volumes:
       - ../app:/app/app
       - ../media:/app/media

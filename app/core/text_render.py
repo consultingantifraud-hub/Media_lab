@@ -285,6 +285,7 @@ def render_text_box(
             "\U00002702-\U000027B0"   # Dingbats
             "\U000024C2-\U0001F251"   # Enclosed characters
             "\U00002764-\U0000279F"   # Additional symbols (❤️, etc.)
+            "\U0001F440-\U0001F4FF"   # Gestures and body parts (👍, 👎, etc.)
             "\U0001F900-\U0001F9FF"   # Supplemental Symbols and Pictographs
             "]+",
             flags=re.UNICODE
@@ -320,6 +321,7 @@ def render_text_box(
                 emoji_chars = [char for char in part_text 
                               if (ord(char) >= 0x1F300 or 
                                   (ord(char) >= 0x2764 and ord(char) <= 0x279F) or
+                                  (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF) or  # Gestures and body parts (👍, 👎, etc.)
                                   (ord(char) >= 0x1F900 and ord(char) <= 0x1F9FF))]
                 if emoji_chars:
                     emoji_size = font_size
@@ -365,6 +367,7 @@ def render_text_box(
         has_emoji_lines = any(
             any((ord(char) >= 0x1F300 or 
                  (ord(char) >= 0x2764 and ord(char) <= 0x279F) or
+                 (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF) or  # Gestures and body parts (👍, 👎, etc.)
                  (ord(char) >= 0x1F900 and ord(char) <= 0x1F9FF))
                 for char in line)
             for line in wrapped_lines
@@ -377,6 +380,7 @@ def render_text_box(
             line_has_emoji = any(
                 (ord(char) >= 0x1F300 or 
                  (ord(char) >= 0x2764 and ord(char) <= 0x279F) or
+                 (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF) or  # Gestures and body parts (👍, 👎, etc.)
                  (ord(char) >= 0x1F900 and ord(char) <= 0x1F9FF))
                 for char in line
             )
@@ -418,7 +422,8 @@ def render_text_box(
     # Рисуем плашку (если нужно)
     if box:
         # Создаем временное изображение для плашки с правильной прозрачностью
-        # box_alpha: 0.0 = полностью прозрачная, 1.0 = непрозрачная
+        # box_alpha: 0.0 = полностью прозрачная (невидимая), 1.0 = полностью непрозрачная (видимая)
+        # box_alpha уже содержит правильное значение непрозрачности от LLM
         alpha_value = int(255 * box_alpha)
         box_img = Image.new("RGBA", (int(box_width), int(box_height)), (*box_color_rgb, alpha_value))
         logger.debug("Box image created: size=({}, {}), color={}, alpha={} ({}%)", 
@@ -600,6 +605,7 @@ def render_text_box(
                                 "\U00002702-\U000027B0"   # Dingbats
                                 "\U000024C2-\U0001F251"   # Enclosed characters
                                 "\U00002764-\U0000279F"   # Additional symbols (❤️, etc.)
+                                "\U0001F440-\U0001F4FF"   # Gestures and body parts (👍, 👎, etc.)
                                 "\U0001F900-\U0001F9FF"   # Supplemental Symbols and Pictographs
                                 "]+",
                                 flags=re.UNICODE
@@ -652,6 +658,7 @@ def render_text_box(
                                         emoji_chars_count = sum(1 for char in part_text 
                                                                if (ord(char) >= 0x1F300 or 
                                                                    (ord(char) >= 0x2764 and ord(char) <= 0x279F) or
+                                                                   (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF) or  # Gestures and body parts (👍, 👎, etc.)
                                                                    (ord(char) >= 0x1F900 and ord(char) <= 0x1F9FF)))
                                         if emoji_chars_count > 0:
                                             emoji_size = font_size
@@ -703,7 +710,9 @@ def render_text_box(
                                             else:
                                                 total_width += len(part_text) * (FONT_SIZES.get(size, 48) // 2)
                                         else:  # emoji
-                                            emoji_chars_count = sum(1 for char in part_text if ord(char) >= 0x1F300)
+                                            emoji_chars_count = sum(1 for char in part_text 
+                                                                   if (ord(char) >= 0x1F300 or 
+                                                                       (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF)))  # Gestures and body parts (👍, 👎, etc.)
                                             if emoji_chars_count > 0:
                                                 emoji_size = font_size
                                                 total_width += emoji_chars_count * emoji_size
@@ -731,7 +740,9 @@ def render_text_box(
                                             else:
                                                 total_width += len(part_text) * (FONT_SIZES.get(size, 48) // 2)
                                         else:  # emoji
-                                            emoji_chars_count = sum(1 for char in part_text if ord(char) >= 0x1F300)
+                                            emoji_chars_count = sum(1 for char in part_text 
+                                                                   if (ord(char) >= 0x1F300 or 
+                                                                       (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF)))  # Gestures and body parts (👍, 👎, etc.)
                                             if emoji_chars_count > 0:
                                                 emoji_size = font_size
                                                 total_width += emoji_chars_count * emoji_size
@@ -819,6 +830,7 @@ def render_text_box(
                                                 char_code = ord(char)
                                                 if (char_code >= 0x1F300 or  # Основной диапазон эмодзи
                                                     (char_code >= 0x2764 and char_code <= 0x279F) or  # Дополнительные символы (❤️ и др.)
+                                                    (char_code >= 0x1F440 and char_code <= 0x1F4FF) or  # Gestures and body parts (👍, 👎, etc.)
                                                     (char_code >= 0x1F900 and char_code <= 0x1F9FF)):  # Supplemental Symbols
                                                     code_point = ord(char)
                                                     emoji_code = f"{code_point:x}"
@@ -952,6 +964,7 @@ def render_text_box(
                         has_emoji = any(
                             (ord(char) >= 0x1F300 or 
                              (ord(char) >= 0x2764 and ord(char) <= 0x279F) or
+                             (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF) or  # Gestures and body parts (👍, 👎, etc.)
                              (ord(char) >= 0x1F900 and ord(char) <= 0x1F9FF))
                             for char in line
                         )
@@ -1030,6 +1043,7 @@ def render_text_box(
             has_emoji = any(
                 (ord(char) >= 0x1F300 or 
                  (ord(char) >= 0x2764 and ord(char) <= 0x279F) or
+                 (ord(char) >= 0x1F440 and ord(char) <= 0x1F4FF) or  # Gestures and body parts (👍, 👎, etc.)
                  (ord(char) >= 0x1F900 and ord(char) <= 0x1F9FF))
                 for char in line
             )

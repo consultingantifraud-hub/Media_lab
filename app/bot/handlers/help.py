@@ -29,6 +29,7 @@ KEYBOARD_BUTTONS = {
 
 
 class HelpStates(StatesGroup):
+    waiting_help_choice = State()  # Состояние после нажатия кнопки "Помощь" - ожидание выбора типа помощи
     waiting_ai_assistant_input = State()
     waiting_support_message = State()  # Состояние после показа "Вопрос разработчикам"
 
@@ -328,7 +329,7 @@ AI_ASSISTANT_SYSTEM_PROMPT = """**Промт для ИИ-помощника Tele
 
 async def handle_help_start(message: types.Message, state: FSMContext) -> None:
     """Обработчик кнопки Помощь - показывает меню помощи."""
-    await state.clear()
+    await state.set_state(HelpStates.waiting_help_choice)
     await message.answer(
         "🆘 **Помощь**\n\n"
         "Выберите тип помощи:\n\n"
@@ -341,6 +342,7 @@ async def handle_help_start(message: types.Message, state: FSMContext) -> None:
 
 async def handle_ai_assistant_start(message: types.Message, state: FSMContext) -> None:
     """Обработчик кнопки ИИ-помощник - начинает диалог с ИИ."""
+    # Выходим из состояния выбора помощи
     await state.set_state(HelpStates.waiting_ai_assistant_input)
     await message.answer(
         "🤖 **ИИ-помощник**\n\n"
@@ -493,7 +495,7 @@ async def handle_ai_assistant_message(message: types.Message, state: FSMContext)
 
 async def handle_support(message: types.Message, state: FSMContext) -> None:
     """Обработчик кнопки Вопрос разработчикам."""
-    # Устанавливаем состояние для обработки последующих сообщений
+    # Выходим из состояния выбора помощи и переходим в состояние ожидания сообщения
     await state.set_state(HelpStates.waiting_support_message)
     
     # Получаем Telegram ID и Username пользователя
@@ -556,6 +558,31 @@ async def handle_support_message(message: types.Message, state: FSMContext) -> N
     await state.clear()
 
 
+async def handle_help_choice_text(message: types.Message, state: FSMContext) -> None:
+    """Обработчик текстовых сообщений в режиме выбора типа помощи."""
+    if not message.text:
+        return
+    
+    user_text = message.text.strip()
+    if not user_text:
+        return
+    
+    # Игнорируем кнопки клавиатуры - они обрабатываются другими обработчиками
+    if user_text in KEYBOARD_BUTTONS:
+        await state.clear()
+        return
+    
+    # Напоминаем о необходимости выбрать раздел помощи
+    await message.answer(
+        "⚠️ **Необходимо выбрать раздел помощи**\n\n"
+        "Пожалуйста, выберите один из вариантов:\n\n"
+        "🤖 **ИИ-помощник** — ответит на ваши вопросы о работе сервиса\n"
+        "💬 **Вопрос разработчикам** — связь с разработчиками сервиса",
+        reply_markup=build_help_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
 def register_help_handlers(dp: Dispatcher) -> None:
     """Регистрация обработчиков помощи."""
     dp.message.register(handle_help_start, _match_button(HELP_BUTTON))
@@ -571,6 +598,12 @@ def register_help_handlers(dp: Dispatcher) -> None:
     dp.message.register(
         handle_support_message,
         StateFilter(HelpStates.waiting_support_message),
+        F.text
+    )
+    # Регистрируем обработчик текстовых сообщений в режиме выбора типа помощи
+    dp.message.register(
+        handle_help_choice_text,
+        StateFilter(HelpStates.waiting_help_choice),
         F.text
     )
 

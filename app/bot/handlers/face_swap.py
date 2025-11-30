@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable
 from uuid import uuid4
@@ -46,14 +47,22 @@ async def handle_face_swap_start(message: types.Message, state: FSMContext) -> N
             parse_mode="Markdown",
         )
         return
-    """Начало процесса замены лица - используем только WaveSpeed модель."""
+    """Начало процесса замены лица - используем WaveSpeed модель, если доступна, иначе базовую."""
     await state.clear()
     
-    # Устанавливаем WaveSpeed модель по умолчанию
+    # Проверяем наличие API ключа WaveSpeedAI и выбираем модель
     try:
         current_settings = reload_settings()
-        model = current_settings.wavespeed_face_swap_model
-        logger.info("handle_face_swap_start: using WaveSpeed model {}", model)
+        wavespeed_api_key = current_settings.wavespeed_api_key or os.getenv("WAVESPEED_API_KEY")
+        
+        if wavespeed_api_key:
+            # Используем WaveSpeed модель, если ключ настроен
+            model = current_settings.wavespeed_face_swap_model
+            logger.info("handle_face_swap_start: using WaveSpeed model {} (API key available)", model)
+        else:
+            # Используем базовую модель Fal.ai, если ключ не настроен
+            model = current_settings.fal_face_swap_model
+            logger.info("handle_face_swap_start: using Fal.ai model {} (WaveSpeed API key not configured)", model)
     except Exception as e:
         logger.error("handle_face_swap_start: failed to load settings: {}", e)
         await message.answer("Ошибка при загрузке настроек. Попробуйте позже.")
@@ -273,17 +282,23 @@ async def _queue_face_swap_job(
         finally:
             db.close()
     
-    # Получаем выбранную модель из state (по умолчанию WaveSpeed)
+    # Получаем выбранную модель из state (по умолчанию WaveSpeed, если доступна, иначе Fal.ai)
     data = await state.get_data()
     model = data.get(FACE_SWAP_MODEL_KEY)
     if not model:
-        # Если модель не установлена, загружаем WaveSpeed модель из настроек
+        # Если модель не установлена, выбираем модель в зависимости от наличия API ключа
         try:
             current_settings = reload_settings()
-            model = current_settings.wavespeed_face_swap_model
-            logger.info("_queue_face_swap_job: model not found in state, using WaveSpeed model from settings: {}", model)
+            import os
+            wavespeed_api_key = current_settings.wavespeed_api_key or os.getenv("WAVESPEED_API_KEY")
+            if wavespeed_api_key:
+                model = current_settings.wavespeed_face_swap_model
+                logger.info("_queue_face_swap_job: model not found in state, using WaveSpeed model from settings: {}", model)
+            else:
+                model = current_settings.fal_face_swap_model
+                logger.info("_queue_face_swap_job: model not found in state, using Fal.ai model (WaveSpeed API key not configured): {}", model)
         except Exception as e:
-            logger.error("_queue_face_swap_job: failed to load WaveSpeed model from settings: {}", e)
+            logger.error("_queue_face_swap_job: failed to load model from settings: {}", e)
             await message.answer("Ошибка при загрузке настроек модели. Попробуйте позже.")
             await state.clear()
             return
@@ -347,19 +362,25 @@ async def handle_face_swap_target_media(message: types.Message, state: FSMContex
         return
     await state.update_data({FACE_SWAP_TARGET_PATH_KEY: saved.as_posix()})
     
-    # Get both images and check which model is selected (should be WaveSpeed)
+    # Get both images and check which model is selected (should be WaveSpeed if available, else Fal.ai)
     data = await state.get_data()
     source_raw = data.get(FACE_SWAP_SOURCE_PATH_KEY)
     target_raw = saved.as_posix()
     model = data.get(FACE_SWAP_MODEL_KEY)
     if not model:
-        # Если модель не установлена, загружаем WaveSpeed модель из настроек
+        # Если модель не установлена, выбираем модель в зависимости от наличия API ключа
         try:
             current_settings = reload_settings()
-            model = current_settings.wavespeed_face_swap_model
-            logger.info("handle_face_swap_target_media: model not found in state, using WaveSpeed model from settings: {}", model)
+            import os
+            wavespeed_api_key = current_settings.wavespeed_api_key or os.getenv("WAVESPEED_API_KEY")
+            if wavespeed_api_key:
+                model = current_settings.wavespeed_face_swap_model
+                logger.info("handle_face_swap_target_media: model not found in state, using WaveSpeed model from settings: {}", model)
+            else:
+                model = current_settings.fal_face_swap_model
+                logger.info("handle_face_swap_target_media: model not found in state, using Fal.ai model (WaveSpeed API key not configured): {}", model)
         except Exception as e:
-            logger.error("handle_face_swap_target_media: failed to load WaveSpeed model from settings: {}", e)
+            logger.error("handle_face_swap_target_media: failed to load model from settings: {}", e)
             await message.answer("Ошибка при загрузке настроек модели. Попробуйте позже.")
             await state.clear()
             return

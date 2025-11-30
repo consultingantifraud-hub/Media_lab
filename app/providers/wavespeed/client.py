@@ -160,6 +160,7 @@ def wavespeed_face_swap(source_path: str, face_path: str, model: str | None = No
                     "source_image": [face_url],  # Лицо для замены (массив)
                     "target_image": [source_url],  # Исходное изображение (массив)
                     "face_enhance": True,  # Улучшение лица
+                    "output_format": "png",  # PNG для максимального качества
                 }
             elif is_head_swap:
                 # wavespeed-ai/image-head-swap использует image и face_image
@@ -175,6 +176,7 @@ def wavespeed_face_swap(source_path: str, face_path: str, model: str | None = No
                     "image": source_url,  # Исходное изображение (куда вставляется лицо)
                     "face_image": face_url,  # Лицо для замены
                     "face_enhance": True,  # Улучшение качества лица для большей схожести
+                    "target_index": 0,  # Явно указываем первое обнаруженное лицо для замены
                     "output_format": "png",  # PNG для максимального качества (без потерь)
                 }
 

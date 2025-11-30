@@ -3102,9 +3102,11 @@ def register_image_handlers(dp: Dispatcher) -> None:
     async def prompt_input_filter(msg: types.Message, state: FSMContext) -> bool:
         if not msg.text or msg.text.startswith("/") or msg.text == BALANCE_BUTTON:
             return False
-        # Пропускаем, если пользователь в режиме "Написать" или в режиме ИИ-помощника
+        # Пропускаем, если пользователь в режиме "Написать" или в режиме помощи
         current_state = await state.get_state()
         from app.bot.handlers.help import HelpStates
+        if current_state == HelpStates.waiting_help_choice.state:
+            return False
         if current_state == HelpStates.waiting_ai_assistant_input.state:
             return False
         if current_state == HelpStates.waiting_support_message.state:

@@ -15,13 +15,20 @@ from app.bot.keyboards.main import BALANCE_BUTTON
 from app.db.models import OperationStatus, User, UserStatistics, Operation, Balance
 from sqlalchemy import func, desc
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     # Fallback for Python < 3.9
     from backports.zoneinfo import ZoneInfo
+
+# Moscow timezone (UTC+3)
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def get_moscow_time() -> datetime:
+    """Get current time in Moscow timezone (UTC+3)."""
+    return datetime.now(timezone.utc).astimezone(MOSCOW_TZ)
 
 
 def format_balance(balance: float | int) -> str:
@@ -1491,7 +1498,7 @@ async def handle_export_stats(message: Message):
             file = FSInputFile(excel_file, filename="statistics_export.xlsx")
             await message.answer_document(
                 document=file,
-                caption=f"📊 Статистика на {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                caption=f"📊 Статистика на {get_moscow_time().strftime('%d.%m.%Y %H:%M')}"
             )
         finally:
             # Clean up temporary file
@@ -1641,7 +1648,7 @@ async def handle_export_stats(message: Message):
         ws_summary.append(["Всего операций", total_operations])
         ws_summary.append(["Всего заработано (₽)", total_revenue])
         ws_summary.append(["Общий баланс пользователей (₽)", total_balance])
-        ws_summary.append(["Дата выгрузки", datetime.now().strftime("%d.%m.%Y %H:%M")])
+        ws_summary.append(["Дата выгрузки", get_moscow_time().strftime("%d.%m.%Y %H:%M")])
         
         # 6. User operations statistics sheet
         from collections import defaultdict

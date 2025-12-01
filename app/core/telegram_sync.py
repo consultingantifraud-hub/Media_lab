@@ -43,6 +43,7 @@ def send_message_sync(
     text: str,
     reply_to_message_id: int | None = None,
     message_thread_id: int | None = None,
+    parse_mode: str | None = None,
 ) -> bool:
     """Send text message synchronously via Telegram Bot API."""
     session = _get_telegram_session()
@@ -56,6 +57,8 @@ def send_message_sync(
         payload["reply_to_message_id"] = reply_to_message_id
     if message_thread_id:
         payload["message_thread_id"] = message_thread_id
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     
     try:
         response = session.post(url, json=payload, timeout=10.0)

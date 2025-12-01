@@ -242,10 +242,11 @@ class PaymentService:
         db.flush()
 
         # Add balance to user
-        # payment.amount is in kopecks, but add_balance expects rubles and converts to kopecks
+        # payment.amount is in kopecks, but add_balance expects rubles (int) and converts to kopecks
         # So we need to convert kopecks back to rubles
         amount_rubles = payment.amount / 100.0
-        success = BillingService.add_balance(db, payment.user_id, amount_rubles)
+        logger.info(f"Processing webhook payment: payment_id={payment.id}, amount={payment.amount} kopecks ({amount_rubles}₽)")
+        success = BillingService.add_balance(db, payment.user_id, int(amount_rubles))
         if success:
             # Получаем баланс после пополнения
             balance_after = BillingService.get_user_balance(db, payment.user_id)
@@ -396,8 +397,10 @@ class PaymentService:
             if status == "succeeded" and payment.status != PaymentStatus.SUCCEEDED:
                 if paid:
                     # Process payment
+                    # payment.amount is in kopecks, add_balance expects rubles (int) and converts to kopecks
                     amount_rubles = payment.amount / 100.0
-                    success = BillingService.add_balance(db, payment.user_id, amount_rubles)
+                    logger.info(f"Processing payment: payment_id={payment.id}, amount={payment.amount} kopecks ({amount_rubles}₽)")
+                    success = BillingService.add_balance(db, payment.user_id, int(amount_rubles))
                     if success:
                         payment.status = PaymentStatus.SUCCEEDED
                         payment.raw_data = payment_data

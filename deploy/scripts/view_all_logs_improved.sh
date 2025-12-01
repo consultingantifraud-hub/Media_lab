@@ -20,6 +20,7 @@ CONTAINERS=(
     "deploy-worker-image-13-1"
     "deploy-worker-image-14-1"
     "deploy-worker-image-15-1"
+    "deploy-worker-image-16-1"
     "docker-worker-image-1"
     "docker-worker-image-2"
     "docker-worker-image-3"

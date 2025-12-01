@@ -23,7 +23,8 @@ async def handle_info(message: types.Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         INFO_INSTRUCTION,
-        reply_markup=build_main_keyboard()
+        reply_markup=build_main_keyboard(),
+        parse_mode="Markdown"
     )
 
 

@@ -105,6 +105,7 @@ services:
       - ../media:/app/media
       - ../app:/app/app
       - ../assets:/app/assets
+      - ../scripts:/app/scripts
       - bot_logs:/app/logs
       - bot_db:/app
     restart: unless-stopped

@@ -17,6 +17,26 @@ from openpyxl.styles import Font, Alignment
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
+# Moscow timezone (UTC+3)
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def to_moscow_time(dt: datetime | None) -> datetime | None:
+    """Convert datetime to Moscow timezone (UTC+3)."""
+    if dt is None:
+        return None
+    # If datetime is naive (no timezone), assume it's UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    # Convert to Moscow time
+    return dt.astimezone(MOSCOW_TZ)
+
+def format_datetime_moscow(dt: datetime | None, format_str: str = "%d.%m.%Y %H:%M") -> str:
+    """Format datetime in Moscow timezone."""
+    if dt is None:
+        return ""
+    moscow_dt = to_moscow_time(dt)
+    return moscow_dt.strftime(format_str)
+
 # Date when we started storing prices in kopecks
 # All operations before this date are assumed to be in rubles (old format)
 # All operations after this date are assumed to be in kopecks (new format)
@@ -153,13 +173,13 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 user.last_name or "",
                 user.language_code or "",
                 "Да" if user.is_premium else "Нет",
-                user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "",
-                user.last_activity_at.strftime("%d.%m.%Y %H:%M") if user.last_activity_at else "",
+                format_datetime_moscow(user.created_at),
+                format_datetime_moscow(user.last_activity_at),
                 balance.balance if balance else 0,
                 total_operations_after_migration,
                 total_spent_after_migration,
-                first_operation_after_migration.strftime("%d.%m.%Y %H:%M") if first_operation_after_migration else "",
-                last_operation_after_migration.strftime("%d.%m.%Y %H:%M") if last_operation_after_migration else "",
+                format_datetime_moscow(first_operation_after_migration),
+                format_datetime_moscow(last_operation_after_migration),
             ])
         
         # 2. Operations by type sheet
@@ -303,7 +323,7 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 op.model or "",
                 price_rubles,
                 op.status,
-                op.created_at.strftime("%d.%m.%Y %H:%M") if op.created_at else "",
+                format_datetime_moscow(op.created_at),
                 prompt,
                 op.image_count or ""
             ])
@@ -361,7 +381,7 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
         ws_summary.append(["Общая себестоимость (₽)", total_cost])
         ws_summary.append(["Общая прибыль (₽)", total_profit])
         ws_summary.append(["Общий баланс пользователей (₽)", total_balance])
-        ws_summary.append(["Дата выгрузки", datetime.now().strftime("%d.%m.%Y %H:%M")])
+        ws_summary.append(["Дата выгрузки", format_datetime_moscow(datetime.now(timezone.utc))])
         
         # 6. User operations statistics sheet
         ws_user_ops = wb.create_sheet("Статистика по пользователям")
@@ -463,7 +483,9 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 is_after_migration = True
             
             if is_after_migration and op.created_at:
-                date_key = op.created_at.date() if hasattr(op.created_at, 'date') else op.created_at
+                # Convert to Moscow time before getting date
+                moscow_dt = to_moscow_time(op.created_at)
+                date_key = moscow_dt.date() if hasattr(moscow_dt, 'date') else moscow_dt
                 daily_data[date_key]['count'] += 1
                 daily_data[date_key]['users'].add(op.user_id)
                 if op.status == "charged":
@@ -522,8 +544,10 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 is_after_migration = True
             
             if is_after_migration and op.created_at:
-                # Get Monday of the week
-                week_start = op.created_at - timedelta(days=op.created_at.weekday())
+                # Convert to Moscow time first
+                moscow_dt = to_moscow_time(op.created_at)
+                # Get Monday of the week in Moscow time
+                week_start = moscow_dt - timedelta(days=moscow_dt.weekday())
                 week_key = week_start.strftime("%d.%m.%Y")
                 
                 weekly_data[week_key]['count'] += 1
@@ -586,14 +610,16 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 is_after_migration = True
             
             if is_after_migration and op.created_at:
-                # Get year and month
-                if hasattr(op.created_at, 'year'):
-                    year = op.created_at.year
-                    month = op.created_at.month
+                # Convert to Moscow time first
+                moscow_dt = to_moscow_time(op.created_at)
+                # Get year and month from Moscow time
+                if hasattr(moscow_dt, 'year'):
+                    year = moscow_dt.year
+                    month = moscow_dt.month
                 else:
                     # Fallback for string dates
-                    year = int(str(op.created_at)[:4])
-                    month = int(str(op.created_at)[5:7])
+                    year = int(str(moscow_dt)[:4])
+                    month = int(str(moscow_dt)[5:7])
                 
                 month_key = (year, month)
                 monthly_data[month_key]['count'] += 1
@@ -665,13 +691,8 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
             
             rows_added = 0
             for question_obj, tg_id, username, first_name in ai_questions:
-                # Format created_at
-                created_at_str = ""
-                if question_obj.created_at:
-                    if isinstance(question_obj.created_at, str):
-                        created_at_str = question_obj.created_at
-                    else:
-                        created_at_str = question_obj.created_at.strftime("%d.%m.%Y %H:%M:%S")
+                # Format created_at in Moscow time
+                created_at_str = format_datetime_moscow(question_obj.created_at, "%d.%m.%Y %H:%M:%S") if question_obj.created_at and not isinstance(question_obj.created_at, str) else (question_obj.created_at if question_obj.created_at else "")
                 
                 # Truncate long text fields for Excel
                 question_text = question_obj.question[:500] if question_obj.question else ""

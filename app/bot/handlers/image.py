@@ -375,11 +375,12 @@ async def _enqueue_image_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                balance_rub = balance_kopecks / 100.0
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Операция стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -513,11 +514,12 @@ async def _enqueue_image_edit_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                balance_rub = balance_kopecks / 100.0
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Редактирование стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -842,11 +844,12 @@ async def _trigger_upscale_for_job(message: types.Message, job_id: str, operatio
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                balance_rub = balance_kopecks / 100.0
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -992,11 +995,12 @@ async def _enqueue_retoucher_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                balance_rub = balance_kopecks / 100.0
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Ретушь стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1844,7 +1848,8 @@ async def _enqueue_smart_merge_task(
             # Get telegram user object if available
             telegram_user = message.from_user if hasattr(message, 'from_user') and message.from_user else None
             user, _ = BillingService.get_or_create_user(db, user_id, telegram_user)
-            price = get_operation_price("merge", selected_model, is_nano_banana_pro_merge)
+            price = get_operation_price("merge", model=selected_model, is_nano_banana_pro=is_nano_banana_pro_merge)
+            logger.info("_enqueue_smart_merge_task: calculated price={}₽ for merge operation with model='{}', is_nano_banana_pro={}", price, selected_model, is_nano_banana_pro_merge)
             
             # Get image count and prompt for statistics
             image_count = len(sources) if sources else None
@@ -1863,11 +1868,12 @@ async def _enqueue_smart_merge_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                balance_rub = balance_kopecks / 100.0
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Изменение стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2563,11 +2569,12 @@ async def handle_edit_media(message: types.Message, state: FSMContext) -> None:
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                balance_rub = balance_kopecks / 100.0
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[

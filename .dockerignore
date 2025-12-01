@@ -1,0 +1,39 @@
+# Exclude media directory (mounted as volume)
+media/
+
+# Exclude Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Exclude virtual environments
+venv/
+env/
+.venv/
+
+# Exclude IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Exclude backup files
+*.backup
+*.bak
+*.backup_*
+
+# Exclude git
+.git/
+.gitignore
+
+# Exclude logs
+*.log
+logs/
+
+# Exclude temporary files
+*.tmp
+*.temp
+.DS_Store
+

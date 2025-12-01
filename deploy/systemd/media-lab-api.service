@@ -1,0 +1,19 @@
+[Unit]
+Description=Telegram Media Lab API
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/media-lab
+EnvironmentFile=/opt/media-lab/.env
+ExecStart=/usr/bin/docker-compose -f /opt/media-lab/deploy/docker-compose.prod.yml up api
+ExecStop=/usr/bin/docker-compose -f /opt/media-lab/deploy/docker-compose.prod.yml stop api
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
+

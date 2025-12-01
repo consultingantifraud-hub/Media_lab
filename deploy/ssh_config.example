@@ -1,0 +1,37 @@
+# Пример конфигурации SSH для подключения к VPS серверу
+# 
+# Инструкция по использованию:
+# 1. Скопируйте этот файл в ~/.ssh/config (Linux/WSL) или C:\Users\<username>\.ssh\config (Windows)
+# 2. Замените значения ниже на ваши реальные данные сервера
+# 3. Установите правильные права доступа: chmod 600 ~/.ssh/config
+
+Host media-lab-vps
+    HostName YOUR_SERVER_IP_OR_DOMAIN
+    User YOUR_USERNAME
+    Port 22
+    IdentityFile ~/.ssh/id_rsa
+    # IdentityFile C:\Users\<username>\.ssh\id_rsa  # Для Windows
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    StrictHostKeyChecking ask
+    UserKnownHostsFile ~/.ssh/known_hosts
+
+# Пример для нескольких серверов:
+# Host media-lab-production
+#     HostName 192.168.1.100
+#     User deploy
+#     Port 22
+#     IdentityFile ~/.ssh/id_rsa_prod
+#
+# Host media-lab-staging
+#     HostName 192.168.1.101
+#     User deploy
+#     Port 22
+#     IdentityFile ~/.ssh/id_rsa_staging
+
+
+
+
+
+
+

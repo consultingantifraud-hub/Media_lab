@@ -1,0 +1,54 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    env_file:
+      - ../.env
+    command: uvicorn app.web.api:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    volumes:
+      - ../media:/app/media
+
+  bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bot
+    env_file:
+      - ../.env
+    depends_on:
+      - redis
+    command: python app/bot/main.py
+    volumes:
+      - ../media:/app/media
+      - ../db:/app/db:rw
+    environment:
+      - DATABASE_URL=sqlite:////app/db/media_lab_shared.db
+
+  worker-image:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    env_file:
+      - ../.env
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=sqlite:////app/db/media_lab_shared.db
+    depends_on:
+      - redis
+    command: rq worker -u redis://127.0.0.1:6379/0 img_queue
+    network_mode: host
+    volumes:
+      - ../media:/app/media
+      - ../db:/app/db:rw
+      - ../app:/app/app:ro
+    restart: unless-stopped

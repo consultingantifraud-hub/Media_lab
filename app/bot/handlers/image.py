@@ -277,7 +277,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "base": {
             "output_format": "png",  # PNG для лучшего качества
             "guidance_scale": 10.0,  # Как у Nano Banana Pro для максимального качества
-            "num_inference_steps": 90,  # Как у Nano Banana Pro для максимальной детализации
+            "num_inference_steps": 50,  # Максимальное значение для Flux 2 Flex (API ограничивает до 50)
             "enable_prompt_expansion": True,  # По умолчанию True
             "enable_safety_checker": True,  # По умолчанию True
         },
@@ -418,12 +418,27 @@ async def _enqueue_image_task(
         finally:
             db.close()
     
-    # Очищаем промпт от возможных префиксов "Промпт: " или "Prompt: "
+    # Очищаем промпт от возможных префиксов "Промпт: ", "Prompt: ", "🚀 Генерирую: ...", и накопленных префиксов
     prompt = prompt.strip()
-    if prompt.lower().startswith("промпт:"):
-        prompt = prompt[7:].strip()
-    elif prompt.lower().startswith("prompt:"):
-        prompt = prompt[7:].strip()
+    
+    # Удаляем все префиксы "🚀 Генерирую: изображение · ..."
+    while "🚀 Генерирую: изображение ·" in prompt:
+        idx = prompt.find("🚀 Генерирую: изображение ·")
+        next_line = prompt.find("\n", idx)
+        if next_line != -1:
+            prompt = prompt[next_line + 1:].strip()
+        else:
+            break
+    
+    # Удаляем все префиксы "Промпт: " или "Prompt: "
+    while prompt.lower().startswith("промпт:") or prompt.lower().startswith("prompt:"):
+        if prompt.lower().startswith("промпт:"):
+            prompt = prompt[7:].strip()
+        elif prompt.lower().startswith("prompt:"):
+            prompt = prompt[7:].strip()
+        # Если после удаления префикса остался еще один префикс, продолжаем
+        if not (prompt.lower().startswith("промпт:") or prompt.lower().startswith("prompt:")):
+            break
     
     logger.info("_enqueue_image_task: starting, prompt='{}', label='{}', base_options={}, operation_id={}", 
                 prompt[:50], label, base_options, operation_id)
@@ -432,16 +447,23 @@ async def _enqueue_image_task(
                    list(base_options.keys()), base_options.get("width"), base_options.get("height"), base_options.get("num_inference_steps"))
     options = _build_notify_options(message, prompt, base_options)
     
-    # Проверяем, является ли модель Nano Banana или Nano Banana Pro (могут принимать русский текст)
+    # Проверяем, является ли модель Nano Banana, Nano Banana Pro или Flux 2 Flex (могут принимать русский текст)
     is_nano_banana = model == IMAGE_STANDARD_MODEL or model == "fal-ai/nano-banana"
-    logger.info("_enqueue_image_task: is_nano_banana={}, is_nano_banana_pro={}", is_nano_banana, is_nano_banana_pro)
+    is_flux2flex = model == "fal-ai/flux-2-flex" or "flux-2-flex" in (model or "").lower()
+    logger.info("_enqueue_image_task: is_nano_banana={}, is_nano_banana_pro={}, is_flux2flex={}", is_nano_banana, is_nano_banana_pro, is_flux2flex)
     
-    translated_prompt = prompt  # Default to original prompt
+    # Для Flux 2 Flex и Nano Banana не устанавливаем provider_prompt в боте,
+    # чтобы воркер использовал оригинальный русский промпт
     if is_nano_banana or is_nano_banana_pro:
         model_name = "Nano Banana Pro" if is_nano_banana_pro else "Nano Banana"
         logger.info("_enqueue_image_task: skipping translation for {} model, using original Russian prompt", model_name)
+        # Не устанавливаем provider_prompt, чтобы воркер использовал оригинальный промпт
+    elif is_flux2flex:
+        logger.info("_enqueue_image_task: skipping translation for Flux 2 Flex model, using original Russian prompt")
+        # Не устанавливаем provider_prompt, чтобы воркер использовал оригинальный промпт
     else:
         logger.info("_enqueue_image_task: calling translate_to_english in executor")
+        translated_prompt = prompt  # Default to original prompt
         try:
             # Выполняем синхронный перевод в отдельном потоке с таймаутом, чтобы не блокировать event loop
             # Увеличено до 10 секунд для более надежного перевода
@@ -467,10 +489,10 @@ async def _enqueue_image_task(
         except Exception as exc:
             logger.error("_enqueue_image_task: translate_to_english failed: {}, using original prompt", exc, exc_info=True)
             translated_prompt = prompt  # Fallback to original prompt
-    
-    # Всегда устанавливаем provider_prompt, даже если перевод не сработал
-    # Это позволяет worker'у видеть, что перевод был попытка
-    options["provider_prompt"] = translated_prompt
+        
+        # Устанавливаем provider_prompt только для моделей, которые требуют перевода
+        # Это позволяет worker'у видеть, что перевод был попытка
+        options["provider_prompt"] = translated_prompt
     logger.info("_enqueue_image_task: calling enqueue_image with prompt='{}'", prompt[:50])
     # Передаем operation_id в options для worker
     if operation_id:
@@ -1302,6 +1324,13 @@ async def _require_prompt(message: types.Message, state: FSMContext) -> str | No
 async def handle_create(message: types.Message, state: FSMContext) -> None:
     """Обработчик кнопки 'Создать' - показывает выбор моделей."""
     try:
+        # Очищаем состояние баланса, если оно было установлено
+        from app.bot.handlers.billing import PaymentStates
+        current_state = await state.get_state()
+        if current_state == PaymentStates.BALANCE_MENU_SHOWN:
+            logger.info("handle_create: clearing BALANCE_MENU_SHOWN state")
+            await state.clear()
+        
         # Проверяем, не находимся ли мы в режиме "Написать"
         from app.bot.handlers.prompt_writer import PromptWriterStates
         current_state = await state.get_state()

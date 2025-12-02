@@ -20,6 +20,7 @@ async def cmd_menu(message: types.Message, state: FSMContext) -> None:
 
 async def handle_info(message: types.Message, state: FSMContext) -> None:
     """Обработчик кнопки Info - показывает инструкцию."""
+    # Очищаем все состояния, включая состояние баланса
     await state.clear()
     await message.answer(
         INFO_INSTRUCTION,

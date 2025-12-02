@@ -1056,6 +1056,50 @@ def process_face_swap_job(
         raise
 
 
+def _enhance_flux2flex_prompt_for_cyrillic(prompt: str) -> str:
+    """
+    Улучшает промпт для Flux 2 Flex для лучшей генерации кириллицы.
+    Добавляет оптимизированные инструкции для четкого и читаемого русского текста.
+    """
+    # Проверяем, есть ли в промпте упоминания о тексте на русском
+    has_russian_text_instruction = any(keyword in prompt.lower() for keyword in [
+        'текст', 'надпись', 'написано', 'шрифт', 'буквы', 'надписи', 'надпись на русском',
+        'русском языке', 'на русском', 'кириллицей', 'кириллица'
+    ])
+    
+    if not has_russian_text_instruction:
+        # Если в промпте нет упоминаний о тексте, возвращаем как есть
+        return prompt
+    
+    # Добавляем оптимизированные инструкции для лучшей генерации кириллицы
+    # Используем более детальные и конкретные инструкции
+    enhancement = (
+        "\n\nКРИТИЧЕСКИ ВАЖНО для генерации русского текста: "
+        "Все надписи и текст на русском языке должны быть: "
+        "максимально четкими и резкими (sharp, crisp), "
+        "полностью разборчивыми (fully legible), "
+        "с очень высоким контрастом (very high contrast), "
+        "с правильными кириллическими буквами без искажений (correct Cyrillic letters without distortions), "
+        "хорошо читаемыми (highly readable), "
+        "в идеальном фокусе (perfect focus), "
+        "с четкими и резкими краями букв (sharp letter edges), "
+        "без размытия (no blur), "
+        "без опечаток (no typos), "
+        "без замены букв (no letter substitutions), "
+        "с правильной кириллицей (correct Cyrillic alphabet). "
+        "Текст должен быть визуально выделен (visually prominent), "
+        "иметь достаточный размер для комфортного чтения (adequate size for comfortable reading), "
+        "иметь контрастный фон для максимальной читаемости (contrasting background for maximum legibility), "
+        "каждая буква должна быть четко различима (each letter must be clearly distinguishable)."
+    )
+    
+    # Добавляем улучшение только если его еще нет в промпте
+    if "максимально четкими" not in prompt.lower() and "критически важно" not in prompt.lower():
+        return prompt + enhancement
+    
+    return prompt
+
+
 def process_image_job(job_id: str, prompt: str, options: dict | None, output_path: str) -> str:
     # Import models to ensure they are registered with Base.metadata
     from app.db import models  # noqa: F401
@@ -1068,7 +1112,27 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
     logger.info("Image job {}: operation_id_raw from options: {} (type: {})", 
                job_id, operation_id_raw, type(operation_id_raw).__name__ if operation_id_raw is not None else "None")
     operation_id = _parse_operation_id(operation_id_raw, job_id, "Image")
-    provider_prompt = provider_options.pop("provider_prompt", prompt)
+    
+    # КРИТИЧЕСКИ ВАЖНО: Проверяем модель ПЕРЕД извлечением provider_prompt, чтобы сразу установить правильный промпт
+    model_name = provider_options.get("model", "")
+    selected_model = provider_options.get("selected_model", "")
+    is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
+    is_flux2flex = "flux-2-flex" in model_name.lower() or selected_model == "flux2flex-create"
+    
+    # Для Nano Banana, Flux 2 Flex используем оригинальный русский промпт БЕЗ перевода
+    if is_nano_banana or is_flux2flex:
+        provider_prompt = prompt  # Используем оригинальный русский промпт
+        if is_nano_banana:
+            logger.info("Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
+        elif is_flux2flex:
+            logger.info("Image job {}: Flux 2 Flex model detected, using original Russian prompt without translation", job_id)
+            # Улучшаем промпт для Flux 2 Flex для лучшей генерации кириллицы
+            provider_prompt = _enhance_flux2flex_prompt_for_cyrillic(prompt)
+            logger.info("Image job {}: Enhanced Flux 2 Flex prompt for better Cyrillic text generation", job_id)
+    else:
+        # Для других моделей извлекаем provider_prompt из options (может быть переведен в боте)
+        provider_prompt = provider_options.pop("provider_prompt", prompt)
+    
     output_file = Path(output_path)
     job = get_current_job()
     if job:
@@ -1102,36 +1166,44 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
 
             logger.info("Image job {}: Using Nano Banana Pro with original Russian prompt: '{}'", job_id, prompt[:50])
 
-        # Проверяем, является ли модель Nano-banana (может принимать русский текст)
-        model_name = provider_options.get("model", "")
-        is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
-
-        if provider_prompt != prompt:
-            logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
-        elif is_nano_banana:
-            # Для Nano-banana не переводим промпт, используем оригинальный русский
-            logger.info("Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
-            provider_prompt = prompt  # Используем оригинальный промпт без перевода
-        else:
-            # Если перевод не сработал, попробуем перевести здесь еще раз
-            # Проверяем, содержит ли промпт кириллицу (признак русского текста)
-            has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
-            logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
-            if has_cyrillic:
-                logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
-                try:
-                    translated = translate_to_english(prompt)
-                    if translated != prompt and translated:
-                        logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
-                                   job_id, prompt[:50], translated[:50])
-                        provider_prompt = translated
-                    else:
-                        logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
-                except Exception as exc:
-                    logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
+        # ВАЖНО: Для моделей, которые поддерживают русский (Nano Banana, Flux 2 Flex),
+        # provider_prompt уже установлен в русском варианте выше, НЕ ПЕРЕВОДИМ!
+        # Для остальных моделей проверяем, нужно ли переводить
+        if not (is_nano_banana or is_flux2flex):
+            if provider_prompt != prompt:
+                logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
+            else:
+                # Если перевод не сработал, попробуем перевести здесь еще раз
+                # Проверяем, содержит ли промпт кириллицу (признак русского текста)
+                has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
+                logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
+                if has_cyrillic:
+                    logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
+                    try:
+                        translated = translate_to_english(prompt)
+                        if translated != prompt and translated:
+                            logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
+                                       job_id, prompt[:50], translated[:50])
+                            provider_prompt = translated
+                        else:
+                            logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
+                    except Exception as exc:
+                        logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
 
         # Используем обычную логику через очередь для всех моделей
         model_name = provider_options.get("model", "")
+        
+        # Применяем настройки качества для Flux 2 Flex (максимальный guidance_scale = 10.0, это лимит API)
+        if is_flux2flex:
+            # Устанавливаем максимальный guidance_scale для лучшего следования инструкциям (максимум 10.0 для Flux 2 Flex)
+            current_guidance = provider_options.get("guidance_scale", 10.0)
+            if current_guidance < 10.0:
+                provider_options["guidance_scale"] = 10.0
+                logger.info("Image job {}: Set guidance_scale to 10.0 (max for Flux 2 Flex) to improve text generation quality", job_id)
+            elif current_guidance > 10.0:
+                # Если значение больше 10.0, ограничиваем до максимума
+                provider_options["guidance_scale"] = 10.0
+                logger.warning("Image job {}: guidance_scale was {}, limited to 10.0 (max for Flux 2 Flex)", job_id, current_guidance)
         
         # Применяем настройки качества для nano-banana (обычный и pro)
         is_nano_banana_regular = model_name == "fal-ai/nano-banana" or ("nano-banana" in model_name.lower() and "pro" not in model_name.lower())

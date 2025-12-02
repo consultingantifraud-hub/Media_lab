@@ -1564,6 +1564,15 @@ async def handle_text_after_balance_menu(message: Message, state: FSMContext):
                message.text,
                current_state)
     
+    # Если пользователь явно пытается создать изображение (выбрал модель), не перехватываем
+    # Проверяем, есть ли в состоянии выбранная модель
+    data = await state.get_data()
+    selected_model = data.get("selected_model") or data.get("model")
+    if selected_model:
+        # Пользователь уже выбрал модель, значит он создает изображение - не перехватываем
+        logger.info("handle_text_after_balance_menu: user has selected model '{}', skipping interception", selected_model)
+        return
+    
     if current_state == PaymentStates.BALANCE_MENU_SHOWN:
         # User entered text after seeing balance menu
         # Check if it's a number (payment amount)

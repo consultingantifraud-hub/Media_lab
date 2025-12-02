@@ -923,9 +923,40 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
     logger.info("Image job {}: operation_id_raw from options: {} (type: {})", 
                job_id, operation_id_raw, type(operation_id_raw).__name__ if operation_id_raw is not None else "None")
     operation_id = _parse_operation_id(operation_id_raw, job_id, "Image")
-    provider_prompt = provider_options.pop("provider_prompt", prompt)
     output_file = Path(output_path)
     job = get_current_job()
+    
+    # КРИТИЧЕСКИ ВАЖНО: Проверяем модель ПЕРЕД извлечением provider_prompt, чтобы сразу установить правильный промпт
+    # Используем тот же подход, что и для Nano Banana
+    # ПРОВЕРКА ДОЛЖНА БЫТЬ ПЕРВОЙ, ДО ЛЮБЫХ ДРУГИХ ОПЕРАЦИЙ С ПРОМПТОМ!
+    model_name = provider_options.get("model", "")
+    selected_model = provider_options.get("selected_model", "")
+    
+    # ПРИНУДИТЕЛЬНАЯ ПРОВЕРКА: логируем ВСЕ параметры для отладки
+    logger.critical("🚨🚨🚨 FLUX2FLEX DEBUG: Image job {} - model_name='{}', selected_model='{}', options_keys={}", 
+                    job_id, model_name, selected_model, list(provider_options.keys())[:10])
+    
+    is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
+    is_flux2flex = "flux-2-flex" in model_name.lower() or selected_model == "flux2flex-create"
+    is_gpt_create = selected_model == "gpt-create"
+    
+    logger.critical("🚨🚨🚨 FLUX2FLEX DEBUG: Image job {} - is_nano_banana={}, is_flux2flex={}, is_gpt_create={}", 
+                    job_id, is_nano_banana, is_flux2flex, is_gpt_create)
+    
+    # Для Nano Banana, Flux 2 Flex и gpt-create используем оригинальный русский промпт БЕЗ перевода
+    if is_nano_banana or is_flux2flex or is_gpt_create:
+        provider_prompt = prompt  # Используем оригинальный русский промпт
+        if is_nano_banana:
+            logger.info("✅ Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
+        elif is_flux2flex:
+            logger.info("✅ Image job {}: Flux 2 Flex model detected, using original Russian prompt without translation", job_id)
+        elif is_gpt_create:
+            logger.info("✅ Image job {}: Nano Banana Pro (gpt-create) detected, using original Russian prompt without translation", job_id)
+    else:
+        # Для других моделей извлекаем provider_prompt из options (может быть переведен в боте)
+        logger.info("⚠️ Image job {}: Not a Russian-compatible model, extracting provider_prompt from options", job_id)
+        provider_prompt = provider_options.pop("provider_prompt", prompt)
+    
     if job:
         job.meta.update({"prompt": prompt})
         if prompt != provider_prompt:
@@ -939,51 +970,44 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
         logger.info("Image job {}: provider_prompt='{}' (same as prompt: {})", 
                     job_id, provider_prompt[:100] if provider_prompt else "None", provider_prompt == prompt)
 
-        # Проверяем, является ли модель Nano Banana Pro (gpt-create - внутренний ключ для UI)
-        selected_model = provider_options.get("selected_model", "")
-        is_gpt_create = selected_model == "gpt-create"
-
+        # Обработка gpt-create (Nano Banana Pro)
         if is_gpt_create:
             # Используем Nano Banana Pro через Fal.ai для лучшего качества кириллицы
             logger.info("Image job {} using Nano Banana Pro (Fal.ai) for text-to-image generation", job_id)
-
-            # Nano Banana Pro поддерживает кириллицу напрямую, не нужно переводить
-            # Используем оригинальный промпт
-            provider_prompt = prompt
-
             # Устанавливаем модель Nano Banana Pro (уже должна быть установлена, но на всякий случай)
             provider_options["model"] = "fal-ai/nano-banana-pro"
             provider_options["selected_model"] = None  # Убираем gpt-create, чтобы использовать обычную логику
-
             logger.info("Image job {}: Using Nano Banana Pro with original Russian prompt: '{}'", job_id, prompt[:50])
 
-        # Проверяем, является ли модель Nano-banana (может принимать русский текст)
-        model_name = provider_options.get("model", "")
-        is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
-
-        if provider_prompt != prompt:
-            logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
-        elif is_nano_banana:
-            # Для Nano-banana не переводим промпт, используем оригинальный русский
-            logger.info("Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
-            provider_prompt = prompt  # Используем оригинальный промпт без перевода
-        else:
-            # Если перевод не сработал, попробуем перевести здесь еще раз
-            # Проверяем, содержит ли промпт кириллицу (признак русского текста)
-            has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
-            logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
-            if has_cyrillic:
-                logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
-                try:
-                    translated = translate_to_english(prompt)
-                    if translated != prompt and translated:
-                        logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
-                                   job_id, prompt[:50], translated[:50])
-                        provider_prompt = translated
-                    else:
-                        logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
-                except Exception as exc:
-                    logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
+        # ВАЖНО: Для моделей, которые поддерживают русский (Nano Banana, Flux 2 Flex, gpt-create),
+        # provider_prompt уже установлен в русском варианте выше, НЕ ПЕРЕВОДИМ!
+        # Для остальных моделей проверяем, нужно ли переводить
+        logger.info("🔍 Image job {}: Translation check - is_nano_banana={}, is_flux2flex={}, is_gpt_create={}, will_skip_translation={}", 
+                    job_id, is_nano_banana, is_flux2flex, is_gpt_create, (is_nano_banana or is_flux2flex or is_gpt_create))
+        if not (is_nano_banana or is_flux2flex or is_gpt_create):
+            if provider_prompt != prompt:
+                # Если промпт был переведен в боте, используем переведенный
+                logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
+            else:
+                # Если provider_prompt == prompt, проверяем, нужно ли переводить
+                # Проверяем, содержит ли промпт кириллицу (признак русского текста)
+                has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
+                logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
+                if has_cyrillic:
+                    logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
+                    try:
+                        translated = translate_to_english(prompt)
+                        if translated != prompt and translated:
+                            logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
+                                       job_id, prompt[:50], translated[:50])
+                            provider_prompt = translated
+                        else:
+                            logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
+                    except Exception as exc:
+                        logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
+                else:
+                    logger.info("Image job {}: skipping translation (no Cyrillic detected, model={})", 
+                               job_id, model_name)
 
         # Используем обычную логику через очередь для всех моделей
         model_name = provider_options.get("model", "")
@@ -1732,175 +1756,198 @@ def process_retoucher_job(
                 _send_failure_notification_sync(notify_options, job_id, error)
             raise RuntimeError(error)
 
-        # Применяем настройки качества для Nano Banana edit в режиме "enhance" (Усилить черты)
-        if mode == "enhance" and ("nano-banana" in model_name.lower() and "pro" not in model_name.lower()):
+        # Для Nano Banana edit используем синхронный режим (как в Smart Merge), 
+        # так как асинхронный queue API не возвращает результат для этой модели
+        if mode == "enhance" and ("nano-banana" in model_name.lower() and "pro" not in model_name.lower() and "/edit" in model_name.lower()):
             # Применяем настройки качества для Nano Banana edit (обычный)
             provider_options["num_inference_steps"] = 60
             provider_options["guidance_scale"] = 9.0
-            logger.info("Retoucher job {}: Applied quality settings for Nano Banana edit: num_inference_steps={}, guidance_scale={}", 
+            logger.info("Retoucher job {}: Using synchronous mode for Nano Banana edit with quality settings: num_inference_steps={}, guidance_scale={}", 
                        job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
-
-        task_id: str | None = None
-        last_error: Exception | None = None
-        for attempt in range(1, RETOUCHER_SUBMIT_MAX_ATTEMPTS + 1):
+            
+            # Используем синхронный режим для nano-banana/edit (как в Smart Merge)
+            from app.providers.fal.images import run_image_edit
             try:
-                task_id = submit_image_edit(
+                asset = run_image_edit(
                     image_path=source_file.as_posix(),
                     prompt=provider_prompt,
                     mask_path=None,
                     **provider_options,
                 )
-                break
-            except httpx.RequestError as exc:
-                last_error = exc
-                logger.warning(
-                    "Retoucher job {} submit attempt {} failed: {}",
-                    job_id,
-                    attempt,
-                    exc,
-                )
-                if attempt < RETOUCHER_SUBMIT_MAX_ATTEMPTS:
-                    time.sleep(RETOUCHER_SUBMIT_BACKOFF * attempt)
+                logger.info("Retoucher job {}: Got result from synchronous run_image_edit: asset.url={}, asset.content={}", 
+                           job_id, asset.url[:100] if asset.url else "None", asset.content is not None)
             except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                logger.error("Retoucher job {} submit failed: {}", job_id, exc)
-                break
-
-        if task_id is None:
-            error_text = "Не удалось отправить запрос на ретушь. Попробуйте позже."
-            if job:
-                job.meta["error"] = str(last_error) if last_error else error_text
-                job.save_meta()
-            if notify_options.get("chat_id"):
-                _send_failure_notification_sync(notify_options, job_id, error_text)
-            if last_error:
-                raise last_error
-            raise RuntimeError(error_text)
-
-        # Polling для получения результата с экспоненциальным backoff
-        poll_attempts = 0
-        max_attempts = 120  # allow up to ~4 minutes for retoucher jobs (with backoff)
-        poll_interval = 2.0  # Start with 2 seconds
-        max_interval = 10.0
-
-        logger.info("Retoucher job {} polling for task {} completion", job_id, task_id)
-        status: dict[str, Any]
-        while True:
-            status = check_image_status(task_id)
-            current_status = status.get("status")
-            # Логируем статус только каждые 5 попыток или при изменении статуса
-            if poll_attempts % 5 == 0 or current_status not in ("processing", "queued", "IN_QUEUE", "IN_PROGRESS"):
-                logger.debug("Retoucher job {} task {} status: {} (attempt {})", job_id, task_id, current_status, poll_attempts + 1)
-
-            if current_status == "succeeded":
-                break
-            if current_status == "failed":
-                error = status.get("error", "Unknown error")
-                logger.error("Retoucher job {} failed: {}", job_id, error)
+                logger.error("Retoucher job {} synchronous run_image_edit failed: {}", job_id, exc)
                 if job:
-                    job.meta["error"] = error
+                    job.meta["error"] = str(exc)
                     job.save_meta()
                 if notify_options.get("chat_id"):
-                    _send_failure_notification_sync(notify_options, job_id, str(error))
-                raise RuntimeError(error)
-            poll_attempts += 1
-            if poll_attempts >= max_attempts:
-                error = "Время ожидания ретуши истекло. Попробуйте позже."
-                logger.error("Retoucher job {} timed out after {} attempts", job_id, poll_attempts)
-                if job:
-                    job.meta["error"] = error
-                    job.save_meta()
-                if notify_options.get("chat_id"):
-                    _send_failure_notification_sync(notify_options, job_id, error)
-                raise RuntimeError(error)
-
-            # Экспоненциальный backoff: увеличиваем интервал до максимума
-            time.sleep(poll_interval)
-            poll_interval = min(poll_interval * 1.1, max_interval)  # Увеличиваем на 10% до максимума
-
-        # Получаем результат после завершения
-        # Используем ту же логику, что и в process_image_edit_job для Nano Banana edit
-        # Сначала проверяем, есть ли результат прямо в статусе
-        from app.providers.fal.images import _extract_image_url as extract_image_url
-        status_image_url = extract_image_url(status)
-        asset = None
-
-        if status_image_url:
-            # Проверяем формат URL
-            if status_image_url.startswith("data:"):
-                logger.info("Retoucher job {} result found in status response (data URL)", job_id)
-                from app.providers.fal.images import ImageAsset
-                import base64
-                header, _, data_part = status_image_url.partition(",")
-                content = base64.b64decode(data_part)
-                asset = ImageAsset(url=None, content=content, filename="retouch.png")
-            elif status_image_url.startswith("http") and not (status_image_url.startswith("https://queue.fal.run") or status_image_url.startswith("http://queue.fal.run")):
-                logger.info("Retoucher job {} result found in status response (direct URL): {}", job_id, status_image_url[:100])
-                from app.providers.fal.images import ImageAsset
-                asset = ImageAsset(url=status_image_url, content=None, filename=None)
-
-        # Если результат не в статусе, получаем через result_url или response_url
-        if asset is None:
-            # Для nano-banana/edit используем response_url, если result_url отсутствует
-            result_url = status.get("result_url") or status.get("response_url")
-            if not result_url:
-                error = "Задача завершена, но результат недоступен"
-                logger.error("Retoucher job {} task {} completed without result URL or result in status", job_id, task_id)
-                if job:
-                    job.meta["error"] = error
-                    job.save_meta()
-                if notify_options.get("chat_id"):
-                    _send_failure_notification_sync(notify_options, job_id, error)
-                raise RuntimeError(error)
-
-            # Небольшая задержка после завершения, чтобы API успел подготовить результат
-            # Уменьшено с 1s до 0.5s для ускорения
-            time.sleep(0.5)
-
-            # Получаем результат с повторными попытками
-            max_result_attempts = 3  # Уменьшено с 5 до 3 попыток
-            result_delay = 0.5  # Уменьшено с 1.0 до 0.5 секунды
-            last_result_error: Exception | None = None
-
-            for result_attempt in range(max_result_attempts):
+                    _send_failure_notification_sync(notify_options, job_id, f"Ошибка ретуши: {exc}")
+                raise
+        else:
+            # Для других моделей используем асинхронный queue API
+            task_id: str | None = None
+            last_error: Exception | None = None
+            for attempt in range(1, RETOUCHER_SUBMIT_MAX_ATTEMPTS + 1):
                 try:
-                    asset = resolve_image_asset(result_url)
-                    logger.info("Retoucher job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
-                               job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
+                    from app.providers.fal.images import submit_image_edit
+                    task_id = submit_image_edit(
+                        image_path=source_file.as_posix(),
+                        prompt=provider_prompt,
+                        mask_path=None,
+                        **provider_options,
+                    )
                     break
-                except httpx.HTTPStatusError as exc:
-                    last_result_error = exc
-                    status_code = exc.response.status_code
-                    if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
-                        logger.warning(
-                            "Retoucher job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
-                            job_id,
-                            result_attempt + 1,
-                            status_code,
-                            exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
-                            result_delay,
-                        )
-                        time.sleep(result_delay)
-                        result_delay *= 1.5
-                        continue
-                    else:
-                        logger.error("Retoucher job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
-                        raise
+                except httpx.RequestError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Retoucher job {} submit attempt {} failed: {}",
+                        job_id,
+                        attempt,
+                        exc,
+                    )
+                    if attempt < RETOUCHER_SUBMIT_MAX_ATTEMPTS:
+                        time.sleep(RETOUCHER_SUBMIT_BACKOFF * attempt)
                 except Exception as exc:  # noqa: BLE001
-                    last_result_error = exc
-                    logger.error("Retoucher job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
-                    if result_attempt >= max_result_attempts - 1:
-                        raise
+                    last_error = exc
+                    logger.error("Retoucher job {} submit failed: {}", job_id, exc)
+                    break
 
-            if asset is None:
-                error = last_result_error or RuntimeError("Failed to get retoucher result")
-                logger.error("Retoucher job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
+            if task_id is None:
+                error_text = "Не удалось отправить запрос на ретушь. Попробуйте позже."
                 if job:
-                    job.meta["error"] = str(error)
+                    job.meta["error"] = str(last_error) if last_error else error_text
                     job.save_meta()
                 if notify_options.get("chat_id"):
-                    _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
-                raise RuntimeError(str(error))
+                    _send_failure_notification_sync(notify_options, job_id, error_text)
+                if last_error:
+                    raise last_error
+                raise RuntimeError(error_text)
+
+            # Polling для получения результата с экспоненциальным backoff
+            poll_attempts = 0
+            max_attempts = 120  # allow up to ~4 minutes for retoucher jobs (with backoff)
+            poll_interval = 2.0  # Start with 2 seconds
+            max_interval = 10.0
+
+            logger.info("Retoucher job {} polling for task {} completion", job_id, task_id)
+            status: dict[str, Any]
+            while True:
+                from app.providers.fal.images import check_image_status
+                status = check_image_status(task_id)
+                current_status = status.get("status")
+                # Логируем статус только каждые 5 попыток или при изменении статуса
+                if poll_attempts % 5 == 0 or current_status not in ("processing", "queued", "IN_QUEUE", "IN_PROGRESS"):
+                    logger.debug("Retoucher job {} task {} status: {} (attempt {})", job_id, task_id, current_status, poll_attempts + 1)
+
+                if current_status == "succeeded":
+                    break
+                if current_status == "failed":
+                    error = status.get("error", "Unknown error")
+                    logger.error("Retoucher job {} failed: {}", job_id, error)
+                    if job:
+                        job.meta["error"] = error
+                        job.save_meta()
+                    if notify_options.get("chat_id"):
+                        _send_failure_notification_sync(notify_options, job_id, str(error))
+                    raise RuntimeError(error)
+                poll_attempts += 1
+                if poll_attempts >= max_attempts:
+                    error = "Время ожидания ретуши истекло. Попробуйте позже."
+                    logger.error("Retoucher job {} timed out after {} attempts", job_id, poll_attempts)
+                    if job:
+                        job.meta["error"] = error
+                        job.save_meta()
+                    if notify_options.get("chat_id"):
+                        _send_failure_notification_sync(notify_options, job_id, error)
+                    raise RuntimeError(error)
+
+                # Экспоненциальный backoff: увеличиваем интервал до максимума
+                time.sleep(poll_interval)
+                poll_interval = min(poll_interval * 1.1, max_interval)  # Увеличиваем на 10% до максимума
+
+            # Получаем результат после завершения
+            from app.providers.fal.images import _extract_image_url as extract_image_url, resolve_image_asset
+            status_image_url = extract_image_url(status)
+            logger.info("Retoucher job {} checking status for result: keys={}, extracted_url={}", 
+                       job_id, list(status.keys()) if isinstance(status, dict) else "not a dict",
+                       status_image_url[:100] if status_image_url else "None")
+            asset = None
+
+            if status_image_url:
+                # Проверяем формат URL
+                if status_image_url.startswith("data:"):
+                    logger.info("Retoucher job {} result found in status response (data URL)", job_id)
+                    from app.providers.fal.images import ImageAsset
+                    import base64
+                    header, _, data_part = status_image_url.partition(",")
+                    content = base64.b64decode(data_part)
+                    asset = ImageAsset(url=None, content=content, filename="retouch.png")
+                elif status_image_url.startswith("http") and not (status_image_url.startswith("https://queue.fal.run") or status_image_url.startswith("http://queue.fal.run")):
+                    logger.info("Retoucher job {} result found in status response (direct URL): {}", job_id, status_image_url[:100])
+                    from app.providers.fal.images import ImageAsset
+                    asset = ImageAsset(url=status_image_url, content=None, filename=None)
+
+            # Если результат не в статусе, получаем через result_url или response_url
+            if asset is None:
+                result_url = status.get("result_url") or status.get("response_url")
+                if not result_url:
+                    error = "Задача завершена, но результат недоступен"
+                    logger.error("Retoucher job {} task {} completed without result URL or result in status", job_id, task_id)
+                    if job:
+                        job.meta["error"] = error
+                        job.save_meta()
+                    if notify_options.get("chat_id"):
+                        _send_failure_notification_sync(notify_options, job_id, error)
+                    raise RuntimeError(error)
+
+                # Небольшая задержка после завершения, чтобы API успел подготовить результат
+                time.sleep(0.5)
+
+                # Получаем результат с повторными попытками
+                max_result_attempts = 3
+                result_delay = 0.5
+                last_result_error: Exception | None = None
+
+                for result_attempt in range(max_result_attempts):
+                    try:
+                        asset = resolve_image_asset(result_url)
+                        logger.info("Retoucher job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
+                                   job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        last_result_error = exc
+                        status_code = exc.response.status_code
+                        if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
+                            logger.warning(
+                                "Retoucher job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
+                                job_id,
+                                result_attempt + 1,
+                                status_code,
+                                exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
+                                result_delay,
+                            )
+                            time.sleep(result_delay)
+                            result_delay *= 1.5
+                            continue
+                        else:
+                            logger.error("Retoucher job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
+                            raise
+                    except Exception as exc:  # noqa: BLE001
+                        last_result_error = exc
+                        logger.error("Retoucher job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
+                        if result_attempt >= max_result_attempts - 1:
+                            raise
+
+                if asset is None:
+                    error = last_result_error or RuntimeError("Failed to get retoucher result")
+                    logger.error("Retoucher job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
+                    if job:
+                        job.meta["error"] = str(error)
+                        job.save_meta()
+                    if notify_options.get("chat_id"):
+                        _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
+                    raise RuntimeError(str(error))
 
         # Используем ту же логику сохранения, что и в process_image_edit_job
         image_url = asset.url

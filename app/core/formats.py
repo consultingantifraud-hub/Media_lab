@@ -407,17 +407,17 @@ def get_model_format_mapping(
     elif "flux-2-flex" in model.lower():
         # Flux 2 Flex поддерживает image_size как enum и custom размеры через width/height
         # Согласно документации: https://fal.ai/models/fal-ai/flux-2-flex/api
-        # Поддерживаемые enum: square_hd, square, portrait_4_3, portrait_16_9, landscape_4_3, landscape_16_9
-        # Для форматов, которых нет в enum (4:5), используем custom размеры
+        # square_hd - высокое разрешение (1024x1024), square - стандартное (512x512)
+        # Для высокого качества используем square_hd и custom размеры с большим разрешением
         format_mapping = {
-            ImageFormat.SQUARE_1_1: {"image_size": "square"},  # 1:1
-            ImageFormat.VERTICAL_3_4: {"image_size": "portrait_4_3"},  # 3:4
-            ImageFormat.HORIZONTAL_4_3: {"image_size": "landscape_4_3"},  # 4:3
+            ImageFormat.SQUARE_1_1: {"image_size": "square_hd"},  # 1:1 - используем square_hd для высокого разрешения
+            ImageFormat.VERTICAL_3_4: {"width": 1024, "height": 1365},  # 3:4 - custom размеры для высокого разрешения
+            ImageFormat.HORIZONTAL_4_3: {"width": 1365, "height": 1024},  # 4:3 - custom размеры для высокого разрешения
             ImageFormat.VERTICAL_4_5: {"width": 1024, "height": 1280},  # 4:5 - custom размеры
-            ImageFormat.VERTICAL_9_16: {"image_size": "portrait_16_9"},  # 9:16
-            ImageFormat.HORIZONTAL_16_9: {"image_size": "landscape_16_9"},  # 16:9
+            ImageFormat.VERTICAL_9_16: {"width": 1024, "height": 1820},  # 9:16 - custom размеры для высокого разрешения
+            ImageFormat.HORIZONTAL_16_9: {"width": 1820, "height": 1024},  # 16:9 - custom размеры для высокого разрешения
         }
-        format_params = format_mapping.get(format_id, {"image_size": "square"})
+        format_params = format_mapping.get(format_id, {"image_size": "square_hd"})
         result.update(format_params)
         result["aspect_ratio"] = spec.aspect_ratio  # Сохраняем для информации
     else:

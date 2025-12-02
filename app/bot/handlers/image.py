@@ -17,6 +17,7 @@ from app.bot.keyboards.main import (
     IMAGE_FACE_SWAP_BUTTON,
     IMAGE_SEEDREAM_CREATE_BUTTON,
     IMAGE_GPT_CREATE_BUTTON,
+    IMAGE_FLUX2FLEX_CREATE_BUTTON,
     IMAGE_EDIT_BUTTON,
     IMAGE_SMART_MERGE_BUTTON,
     IMAGE_RETOUCHER_BUTTON,
@@ -268,6 +269,24 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
             "vertical": {"size": "1536x2048", "aspect_ratio": "3:4", "width": 1536, "height": 2048},
             "square": {"size": "2048x2048", "aspect_ratio": "1:1", "width": 2048, "height": 2048},
             "horizontal": {"size": "2048x1536", "aspect_ratio": "4:3", "width": 2048, "height": 1536},
+        },
+    },
+    "flux2flex-create": {
+        "label": "изображение",
+        "model": "fal-ai/flux-2-flex",  # Flux 2 Flex модель
+        "base": {
+            "output_format": "png",  # PNG для лучшего качества
+            "guidance_scale": 10.0,  # Как у Nano Banana Pro для максимального качества
+            "num_inference_steps": 90,  # Как у Nano Banana Pro для максимальной детализации
+            "enable_prompt_expansion": True,  # По умолчанию True
+            "enable_safety_checker": True,  # По умолчанию True
+        },
+        "sizes": {
+            # Flux 2 Flex поддерживает стандартные размеры через image_size enum
+            # Но правильные размеры будут установлены через get_model_format_mapping
+            "vertical": {"image_size": "portrait_4_3", "aspect_ratio": "3:4"},
+            "square": {"image_size": "square", "aspect_ratio": "1:1"},
+            "horizontal": {"image_size": "landscape_4_3", "aspect_ratio": "4:3"},
         },
     },
     "gpt-create": {
@@ -1431,6 +1450,37 @@ async def handle_seedream_create(message: types.Message, state: FSMContext) -> N
         await _send_error_notification(message, "handle_seedream_create")
 
 
+async def handle_flux2flex_create(message: types.Message, state: FSMContext) -> None:
+    """Обработчик выбора модели Flux 2 Flex после нажатия 'Создать'."""
+    try:
+        data = await state.get_data()
+        smart_merge_stage = data.get(SMART_MERGE_STAGE_KEY)
+        if smart_merge_stage:
+            logger.debug("handle_flux2flex_create: ignoring because smart_merge_stage is active")
+            return
+        
+        prompt = await _require_prompt(message, state)
+        if not prompt:
+            logger.warning("handle_flux2flex_create: prompt not found in state for user {}", 
+                          message.from_user.id if message.from_user else "unknown")
+            return
+        logger.info("handle_flux2flex_create: prompt found: '{}', saving selected_model='flux2flex-create'", prompt[:50])
+        await state.update_data(selected_model="flux2flex-create", prompt=prompt)
+        
+        format_hints = get_format_hints_text()
+        format_message = (
+            "Вы выбрали Flux 2 Flex. Выберите формат изображения:\n\n"
+            f"{format_hints}"
+        )
+        await message.answer(
+            format_message,
+            reply_markup=build_format_keyboard(),
+        )
+    except Exception as exc:
+        logger.error("Error in handle_flux2flex_create: {}", exc, exc_info=True)
+        await _send_error_notification(message, "handle_flux2flex_create")
+
+
 async def handle_gpt_create(message: types.Message, state: FSMContext) -> None:
     """Обработчик выбора модели Nano Banana Pro после нажатия 'Создать'."""
     try:
@@ -2190,7 +2240,7 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
         return
     
     # Игнорируем кнопки выбора модели - они обрабатываются своими handlers
-    if text == IMAGE_STANDARD_BUTTON or text == IMAGE_SEEDREAM_CREATE_BUTTON or text == IMAGE_GPT_CREATE_BUTTON:
+    if text == IMAGE_STANDARD_BUTTON or text == IMAGE_SEEDREAM_CREATE_BUTTON or text == IMAGE_GPT_CREATE_BUTTON or text == IMAGE_FLUX2FLEX_CREATE_BUTTON:
         return
     
     # Игнорируем кнопки выбора размера - они обрабатываются handle_size_choice
@@ -2417,10 +2467,11 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
                 list(saved_data.keys()) if saved_data else [])
     
     # Сразу показываем выбор моделей после принятия промпта
-    # Порядок моделей (сверху вниз): 1. Nano Banana Pro, 2. Nano Banana, 3. Seedream
+    # Раскладка кнопок (2x2): Верхний ряд: Nano Banana Pro, Flux 2 Flex; Нижний ряд: Nano Banana, Seedream
     await message.answer(
         "Промпт принят ✅.\nВыберите модель для создания изображения:\n"
         "• **Nano Banana Pro** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
+        "• **Flux 2 Flex** — современная модель с улучшенной типографикой и рендерингом текста\n"
         "• **Nano Banana** — топовая нейросеть, пишет только заголовки на кириллице\n"
         "• **Seedream** — качественная нейросеть, пишет текст только на английском языке",
         reply_markup=build_create_model_keyboard(),
@@ -3059,11 +3110,12 @@ def register_image_handlers(dp: Dispatcher) -> None:
     
     # Регистрируем обработчики создания изображения ПОСЛЕДНИМИ, чтобы они проверялись ПЕРВЫМИ
     # Это гарантирует, что они имеют приоритет при обработке кнопок моделей после "Создать"
-    # Порядок моделей (приоритет): 1. Nano Banana Pro, 2. Nano Banana, 3. Seedream
+    # Порядок моделей (приоритет): 1. Nano Banana Pro, 2. Flux 2 Flex, 3. Nano Banana, 4. Seedream
     dp.message.register(handle_create, _match_button(CREATE_BUTTON))
     dp.message.register(handle_gpt_create, _match_button(IMAGE_GPT_CREATE_BUTTON))  # 1. Nano Banana Pro
-    dp.message.register(handle_standard, _match_button(IMAGE_STANDARD_BUTTON))  # 2. Nano Banana
-    dp.message.register(handle_seedream_create, _match_button(IMAGE_SEEDREAM_CREATE_BUTTON))  # 3. Seedream
+    dp.message.register(handle_flux2flex_create, _match_button(IMAGE_FLUX2FLEX_CREATE_BUTTON))  # 2. Flux 2 Flex
+    dp.message.register(handle_standard, _match_button(IMAGE_STANDARD_BUTTON))  # 3. Nano Banana
+    dp.message.register(handle_seedream_create, _match_button(IMAGE_SEEDREAM_CREATE_BUTTON))  # 4. Seedream
     
     # Обработчики редактирования регистрируем ПЕРЕД созданием,
     # чтобы они проверялись ПОСЛЕ создания (в обратном порядке)

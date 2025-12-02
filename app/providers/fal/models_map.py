@@ -36,6 +36,7 @@ IMAGE_MODEL_ALIASES = {
     "seedream": "fal-ai/bytedance/seedream/v4/edit",
     "seedream-edit": "fal-ai/bytedance/seedream/v4/edit",
     "seedream-create": "fal-ai/bytedance/seedream/v4/text-to-image",  # Модель для создания без входного изображения
+    "flux2flex-create": "fal-ai/flux-2-flex",  # Flux 2 Flex модель для создания изображений
     "gpt-image-1-mini": "fal-ai/gpt-image-1-mini/edit",
     "reve": "fal-ai/reve/fast/edit",
     "stylish": "fal-ai/ideogram/v2/edit",

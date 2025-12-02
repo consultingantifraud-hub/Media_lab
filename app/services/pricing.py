@@ -5,6 +5,7 @@ from loguru import logger
 
 # Base prices from environment or defaults
 PRICE_NANO_BANANA_PRO = float(os.getenv("PRICE_NANO_BANANA_PRO", "26"))
+PRICE_FLUX2FLEX = float(os.getenv("PRICE_FLUX2FLEX", "23"))  # Цена для Flux 2 Flex
 PRICE_OTHER_MODELS = float(os.getenv("PRICE_OTHER_MODELS", "9"))
 PRICE_SEEDREAM = float(os.getenv("PRICE_SEEDREAM", "7.5"))  # Цена для Seedream в операциях generate и edit
 PRICE_PROMPT_GENERATION = float(os.getenv("PRICE_PROMPT_GENERATION", "3"))
@@ -14,6 +15,7 @@ PRICE_ADD_TEXT = float(os.getenv("PRICE_ADD_TEXT", "1"))
 # Operation type to price mapping
 OPERATION_PRICES: Dict[str, float] = {
     "generate_nano_banana_pro": PRICE_NANO_BANANA_PRO,
+    "generate_flux2flex": PRICE_FLUX2FLEX,
     "generate_other": PRICE_OTHER_MODELS,
     "prompt_generation": PRICE_PROMPT_GENERATION,
     "face_swap": PRICE_FACE_SWAP,
@@ -118,6 +120,7 @@ def get_all_prices() -> Dict[str, float]:
     """Get all operation prices for display."""
     return {
         "Nano Banana Pro (генерация/объединение)": PRICE_NANO_BANANA_PRO,
+        "Flux 2 Flex (генерация)": PRICE_FLUX2FLEX,
         "Seedream (генерация/редактирование)": PRICE_SEEDREAM,
         "Nano Banana (генерация/редактирование)": PRICE_OTHER_MODELS,
         "Остальные модели (генерация/редактирование/объединение/ретушь/upscale)": PRICE_OTHER_MODELS,

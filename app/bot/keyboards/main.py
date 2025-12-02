@@ -25,6 +25,7 @@ IMAGE_FACE_SWAP_ADVANCED_BUTTON = "🔄 WaveSpeed Face Swap"  # Высокое �
 IMAGE_STANDARD_BUTTON = "Nano Banana"  # Используется для выбора модели после "Создать"
 IMAGE_SEEDREAM_CREATE_BUTTON = "Seedream"  # Используется для выбора модели после "Создать"
 IMAGE_GPT_CREATE_BUTTON = "Nano Banana Pro"  # Nano Banana Pro через Fal.ai - лучшее качество кириллицы
+IMAGE_FLUX2FLEX_CREATE_BUTTON = "Flux 2 Flex"  # Flux 2 Flex через Fal.ai
 
 # Кнопки редактирования
 IMAGE_EDIT_CHRONO_BUTTON = "Chrono Edit"
@@ -199,15 +200,13 @@ def build_smart_merge_model_keyboard() -> ReplyKeyboardMarkup:
 def build_create_model_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура выбора модели после нажатия 'Создать'.
     
-    Порядок моделей (сверху вниз):
-    1. Nano Banana Pro — лучшее качество кириллицы
-    2. Nano Banana — топовая нейросеть, пишет только заголовки на кириллице
-    3. Seedream — топовая нейросеть, пишет текст только на английском языке
+    Раскладка кнопок (2x2):
+    Верхний ряд: Nano Banana Pro, Flux 2 Flex
+    Нижний ряд: Nano Banana, Seedream
     """
     buttons = [
-        [KeyboardButton(text=IMAGE_GPT_CREATE_BUTTON)],  # 1. Nano Banana Pro
-        [KeyboardButton(text=IMAGE_STANDARD_BUTTON)],     # 2. Nano Banana
-        [KeyboardButton(text=IMAGE_SEEDREAM_CREATE_BUTTON)],  # 3. Seedream
+        [KeyboardButton(text=IMAGE_GPT_CREATE_BUTTON), KeyboardButton(text=IMAGE_FLUX2FLEX_CREATE_BUTTON)],  # Верхний ряд: Nano Banana Pro, Flux 2 Flex
+        [KeyboardButton(text=IMAGE_STANDARD_BUTTON), KeyboardButton(text=IMAGE_SEEDREAM_CREATE_BUTTON)],   # Нижний ряд: Nano Banana, Seedream
         [KeyboardButton(text=INFO_BUTTON)],
     ]
     return ReplyKeyboardMarkup(

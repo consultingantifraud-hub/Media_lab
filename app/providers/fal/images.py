@@ -355,6 +355,27 @@ def _build_input_payload(prompt: str, options: Dict[str, Any]) -> Dict[str, Any]
         # Удаляем size и aspect_ratio, если они есть, так как Seedream использует image_size
         options.pop("size", None)
         options.pop("aspect_ratio", None)
+    # Для Flux 2 Flex используем image_size как enum (portrait_4_3, square, landscape_4_3 и т.д.)
+    # или custom размеры через width/height для формата 4:5
+    elif model and "flux-2-flex" in model.lower():
+        # Flux 2 Flex принимает image_size как enum согласно документации: https://fal.ai/models/fal-ai/flux-2-flex/api
+        # Для формата 4:5 используем custom размеры через width/height
+        if "width" in options and "height" in options:
+            # Custom размеры для формата 4:5
+            width = options.pop("width")
+            height = options.pop("height")
+            payload["image_size"] = {
+                "width": width,
+                "height": height
+            }
+            logger.info("_build_input_payload: Flux 2 Flex detected, setting custom image_size={{width: {}, height: {}}}", width, height)
+        elif "image_size" in options:
+            # Enum значение (square, portrait_4_3, landscape_4_3, portrait_16_9, landscape_16_9)
+            payload["image_size"] = options.pop("image_size")
+            logger.info("_build_input_payload: Flux 2 Flex detected, setting image_size={}", payload["image_size"])
+        # Удаляем size и aspect_ratio, если они есть, так как Flux 2 Flex использует image_size
+        options.pop("size", None)
+        options.pop("aspect_ratio", None)
     elif "width" in options and "height" in options:
         # Если есть width и height, используем их напрямую (приоритет над size)
         payload["width"] = options.pop("width")
@@ -1429,6 +1450,36 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
                             logger.warning("resolve_result_asset: queue_get failed for {}: {}", response_url[:100], queue_get_exc)
             except Exception as result_exc:  # noqa: BLE001
                 logger.error("resolve_result_asset: Failed to get status for {}: {}", model_type, result_exc, exc_info=True)
+        # Для Flux 2 Flex используем queue_status и queue_get, так как queue_result возвращает 405
+        elif cached_model and "flux-2-flex" in cached_model.lower():
+            logger.info("resolve_result_asset: Using queue_status for flux-2-flex (request_id={}, model_path={})", request_id, model_path)
+            try:
+                # Получаем статус через queue_status
+                status_data = queue_status(model_path, request_id)
+                logger.info("resolve_result_asset: Got status data for flux-2-flex: keys={}", list(status_data.keys()) if isinstance(status_data, dict) else "not a dict")
+                
+                # Добавляем status_data в candidates для извлечения URL
+                result_candidates.append(status_data)
+                
+                # Извлекаем response_url из статуса и пробуем получить результат
+                response_url = status_data.get("response_url")
+                if response_url and response_url.startswith("http"):
+                    logger.info("resolve_result_asset: Trying queue_get for flux-2-flex response_url: {}", response_url[:100])
+                    try:
+                        result_data = queue_get(response_url)
+                        logger.info("resolve_result_asset: Got result from queue_get for flux-2-flex: keys={}", list(result_data.keys()) if isinstance(result_data, dict) else "not a dict")
+                        # Добавляем result_data в candidates для извлечения URL
+                        result_candidates.append(result_data)
+                    except Exception as queue_get_exc:  # noqa: BLE001
+                        logger.warning("resolve_result_asset: queue_get failed for flux-2-flex response_url: {}", queue_get_exc)
+                
+                # Также проверяем raw_result из кэша
+                raw_result = cache_entry.get("raw_result")
+                if raw_result:
+                    logger.info("resolve_result_asset: Adding raw_result to candidates for flux-2-flex: keys={}", list(raw_result.keys()) if isinstance(raw_result, dict) else "not a dict")
+                    result_candidates.append(raw_result)
+            except Exception as result_exc:  # noqa: BLE001
+                logger.error("resolve_result_asset: Failed to get status for flux-2-flex: {}", result_exc, exc_info=True)
         else:
             # Для других моделей используем queue_result
             attempts = 0

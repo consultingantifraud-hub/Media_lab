@@ -404,6 +404,22 @@ def get_model_format_mapping(
         result["width"] = width
         result["height"] = height
         result["size"] = f"{width}x{height}"  # Также сохраняем как строку для совместимости
+    elif "flux-2-flex" in model.lower():
+        # Flux 2 Flex поддерживает image_size как enum и custom размеры через width/height
+        # Согласно документации: https://fal.ai/models/fal-ai/flux-2-flex/api
+        # Поддерживаемые enum: square_hd, square, portrait_4_3, portrait_16_9, landscape_4_3, landscape_16_9
+        # Для форматов, которых нет в enum (4:5), используем custom размеры
+        format_mapping = {
+            ImageFormat.SQUARE_1_1: {"image_size": "square"},  # 1:1
+            ImageFormat.VERTICAL_3_4: {"image_size": "portrait_4_3"},  # 3:4
+            ImageFormat.HORIZONTAL_4_3: {"image_size": "landscape_4_3"},  # 4:3
+            ImageFormat.VERTICAL_4_5: {"width": 1024, "height": 1280},  # 4:5 - custom размеры
+            ImageFormat.VERTICAL_9_16: {"image_size": "portrait_16_9"},  # 9:16
+            ImageFormat.HORIZONTAL_16_9: {"image_size": "landscape_16_9"},  # 16:9
+        }
+        format_params = format_mapping.get(format_id, {"image_size": "square"})
+        result.update(format_params)
+        result["aspect_ratio"] = spec.aspect_ratio  # Сохраняем для информации
     else:
         # Для остальных моделей используем aspect_ratio по умолчанию
         result["aspect_ratio"] = spec.aspect_ratio

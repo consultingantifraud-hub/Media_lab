@@ -30,9 +30,11 @@ IMAGE_FLUX2FLEX_CREATE_BUTTON = "Flux 2 Flex"  # Flux 2 Flex через Fal.ai
 # Кнопки редактирования
 IMAGE_EDIT_CHRONO_BUTTON = "Chrono Edit"
 IMAGE_EDIT_SEDEDIT_BUTTON = "Seedream"
+IMAGE_EDIT_FLUX2PRO_BUTTON = "Flux 2 Pro"
 
 # Кнопки Smart merge (используем уникальные названия, чтобы избежать конфликта с кнопками создания)
 IMAGE_SMART_MERGE_PRO_BUTTON = "Nano Banana Pro edit"
+IMAGE_SMART_MERGE_FLUX2PRO_BUTTON = "Flux 2 Pro edit"
 IMAGE_SMART_MERGE_NANO_BUTTON = "Nano Banana edit"
 IMAGE_SMART_MERGE_SEEDREAM_BUTTON = "Seedream edit"
 
@@ -127,6 +129,7 @@ def build_format_keyboard() -> ReplyKeyboardMarkup:
 def build_edit_model_keyboard() -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text=IMAGE_EDIT_CHRONO_BUTTON), KeyboardButton(text=IMAGE_EDIT_SEDEDIT_BUTTON)],
+        [KeyboardButton(text=IMAGE_EDIT_FLUX2PRO_BUTTON)],
         [KeyboardButton(text=INFO_BUTTON)],
     ]
     return ReplyKeyboardMarkup(
@@ -179,15 +182,13 @@ def build_quality_keyboard() -> ReplyKeyboardMarkup:
 def build_smart_merge_model_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура выбора модели для изменения изображений.
     
-    Порядок моделей (сверху вниз):
-    1. Nano Banana Pro edit — лучшее качество кириллицы
-    2. Nano Banana edit — качественное изменение объектов и сцен
-    3. Seedream edit — лучше работает с людьми, добавляет объекты
+    Порядок моделей (формат 2x2):
+    Ряд 1: Nano Banana Pro edit, [Flux 2 Pro edit - временно отключен]
+    Ряд 2: Nano Banana edit, Seedream edit
     """
     buttons = [
-        [KeyboardButton(text=IMAGE_SMART_MERGE_PRO_BUTTON)],  # 1. Nano Banana Pro
-        [KeyboardButton(text=IMAGE_SMART_MERGE_NANO_BUTTON)],   # 2. Nano Banana
-        [KeyboardButton(text=IMAGE_SMART_MERGE_SEEDREAM_BUTTON)],  # 3. Seedream
+        [KeyboardButton(text=IMAGE_SMART_MERGE_PRO_BUTTON)],  # Ряд 1: Nano Banana Pro (Flux 2 Pro временно отключен)
+        [KeyboardButton(text=IMAGE_SMART_MERGE_NANO_BUTTON), KeyboardButton(text=IMAGE_SMART_MERGE_SEEDREAM_BUTTON)],  # Ряд 2: Nano Banana, Seedream
         [KeyboardButton(text=INFO_BUTTON)],
     ]
     return ReplyKeyboardMarkup(

@@ -14,6 +14,11 @@ from loguru import logger
 from rq import get_current_job
 from PIL import Image
 
+# JobTimeoutException не существует в RQ 1.15.1, создаем свой класс
+class JobTimeoutException(Exception):
+    """Исключение для обработки таймаутов задач RQ"""
+    pass
+
 from app.core.config import settings
 from app.core.queues import get_job
 import httpx
@@ -36,8 +41,9 @@ except ImportError:
 from app.providers.fal.client import download_file, run_model
 from app.providers.fal.models_map import model_requires_mask
 from app.providers.fal.images import _extract_image_url, ImageAsset
+from app.providers.fal import images as fal_images
 from app.utils.translation import translate_to_english
-from app.core.formats import ImageFormat, convert_image_to_format
+# Format conversion is not used - models receive aspect_ratio and return images with correct aspect ratio
 
 # Import models and initialize database to ensure tables exist
 from app.db import models  # noqa: F401
@@ -74,6 +80,110 @@ UPSCALE_MAX_ATTEMPTS = 3
 UPSCALE_RETRY_BASE_DELAY = 2.0
 UPSCALE_POLL_MAX_ATTEMPTS = 36  # 3 minutes max (36 * 5 seconds) - matches RQ job timeout
 
+# Retry декоратор для обработки сетевых ошибок
+from functools import wraps
+from typing import Callable, TypeVar
+
+T = TypeVar('T')
+
+def retry_on_network_error(
+    max_attempts: int = 3,
+    base_delay: float = 2.0,
+    retryable_status_codes: tuple[int, ...] = (500, 502, 503, 504, 429),
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """
+    Декоратор для автоматического повтора операций при сетевых ошибках.
+    
+    Args:
+        max_attempts: Максимальное количество попыток
+        base_delay: Базовая задержка между попытками (секунды)
+        retryable_status_codes: HTTP статус коды, при которых стоит повторять запрос
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> T:
+            last_error: Exception | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except httpx.RequestError as e:
+                    # Сетевые ошибки (таймауты, соединение и т.д.)
+                    last_error = e
+                    if attempt < max_attempts:
+                        delay = base_delay * attempt
+                        logger.warning(
+                            "{} attempt {}/{} failed with network error: {}. Retrying in {:.1f}s",
+                            func.__name__,
+                            attempt,
+                            max_attempts,
+                            str(e)[:100],
+                            delay,
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error(
+                            "{} failed after {} attempts with network error: {}",
+                            func.__name__,
+                            max_attempts,
+                            str(e)[:200],
+                        )
+                        raise
+                except httpx.HTTPStatusError as e:
+                    # HTTP ошибки
+                    status_code = e.response.status_code if hasattr(e, 'response') else 0
+                    if status_code in retryable_status_codes and attempt < max_attempts:
+                        delay = base_delay * attempt
+                        logger.warning(
+                            "{} attempt {}/{} failed with HTTP {}: {}. Retrying in {:.1f}s",
+                            func.__name__,
+                            attempt,
+                            max_attempts,
+                            status_code,
+                            str(e)[:100],
+                            delay,
+                        )
+                        time.sleep(delay)
+                        last_error = e
+                        continue
+                    else:
+                        # Неповторяемые ошибки или последняя попытка
+                        logger.error(
+                            "{} failed with HTTP {}: {}",
+                            func.__name__,
+                            status_code,
+                            str(e)[:200],
+                        )
+                        raise
+                except Exception as e:  # noqa: BLE001
+                    # Другие ошибки - не повторяем
+                    logger.error(
+                        "{} failed with unexpected error: {}",
+                        func.__name__,
+                        str(e)[:200],
+                    )
+                    raise
+            # Если дошли сюда, значит все попытки исчерпаны
+            if last_error:
+                raise last_error
+            raise RuntimeError(f"{func.__name__} failed after {max_attempts} attempts")
+        return wrapper
+    return decorator
+
+
+# Обертки для критических сетевых операций с автоматическим retry
+@retry_on_network_error(max_attempts=3, base_delay=2.0)
+def _download_file_with_retry(url: str, path: str) -> None:
+    """Обертка для download_file с автоматическим retry при сетевых ошибках."""
+    download_file(url, path)
+
+
+@retry_on_network_error(max_attempts=3, base_delay=2.0)
+def _resolve_image_asset_with_retry(result_url: str):
+    """Обертка для resolve_image_asset с автоматическим retry при сетевых ошибках."""
+    from app.providers.fal.images import resolve_result_asset as resolve_image_asset
+    return resolve_image_asset(result_url)
+
+
 def _extract_notify_options(options: Dict[str, Any]) -> dict[str, Any]:
     return {
         "chat_id": options.pop("notify_chat_id", None),
@@ -84,53 +194,159 @@ def _extract_notify_options(options: Dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _check_job_timeout(job_id: str, notify_options: dict[str, Any] | None = None) -> None:
+    """
+    Проверяет, не превышен ли таймаут задачи.
+    Если таймаут превышен, отправляет уведомление пользователю и выбрасывает исключение.
+    """
+    job = get_current_job()
+    if not job:
+        return
+    
+    # Проверяем, не истек ли таймаут задачи
+    try:
+        # RQ автоматически выбрасывает JobTimeoutException при таймауте
+        # Но мы можем проверить время выполнения
+        if hasattr(job, 'timeout') and job.timeout:
+            # Если задача выполняется слишком долго, предупреждаем
+            # (RQ сам прервет задачу по таймауту)
+            pass
+    except JobTimeoutException:
+        error_msg = "⏱️ Время выполнения задачи истекло (4 минуты). Попробуйте еще раз."
+        logger.error("Job {} timed out", job_id)
+        if notify_options and notify_options.get("chat_id"):
+            _send_failure_notification_sync(notify_options, job_id, error_msg)
+        raise
+
+
+def _handle_job_timeout(job_id: str, notify_options: dict[str, Any] | None, operation_type: str = "задача") -> None:
+    """
+    Обрабатывает таймаут задачи и отправляет уведомление пользователю.
+    """
+    error_msg = f"⏱️ Время выполнения {operation_type} истекло (4 минуты). Попробуйте еще раз или упростите запрос."
+    logger.error("Job {} timed out for operation: {}", job_id, operation_type)
+    if notify_options and notify_options.get("chat_id"):
+        try:
+            _send_failure_notification_sync(notify_options, job_id, error_msg)
+        except Exception as notify_exc:
+            logger.error("Failed to send timeout notification for job {}: {}", job_id, notify_exc)
+
+
 def _persist_asset(asset, output_path: str, skip_download: bool = False) -> Path | None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if asset.content is not None:
-        logger.debug("_persist_asset: writing {} bytes to {}", len(asset.content), path)
+        logger.info("_persist_asset: writing {} bytes (synchronous) to {}", len(asset.content), path)
         path.write_bytes(asset.content)
+        logger.info("_persist_asset: successfully saved {} bytes to {}", path.stat().st_size, path)
         return path
     if asset.url and not skip_download:
         try:
-            logger.debug("_persist_asset: downloading from {} to {}", asset.url, path)
-            download_file(asset.url, path.as_posix())
+            logger.info("📥 SYNC DOWNLOAD START: {} -> {}", asset.url[:80], path)
+            _download_file_with_retry(asset.url, path.as_posix())
             if path.exists():
-                logger.debug("_persist_asset: successfully saved to {} ({} bytes)", path, path.stat().st_size)
+                file_size = path.stat().st_size
+                logger.info("✅ SYNC DOWNLOAD COMPLETE: {} bytes ({:.2f} KB) saved to {}", 
+                           file_size, file_size / 1024, path)
                 return path
             else:
                 logger.warning("_persist_asset: download completed but file does not exist: {}", path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to persist remote asset {}: {}", asset.url, exc, exc_info=True)
     elif asset.url and skip_download:
-        logger.debug("_persist_asset: skipping download (skip_download=True), will use URL directly")
+        logger.info("_persist_asset: skipping download (skip_download=True), will use URL directly")
     return None
 
 
 def _schedule_result_download(job_id: str, url: str, target_path: Path) -> None:
     def _worker() -> None:
         try:
-            # Download the JPEG file (API should return JPEG)
-            jpeg_path = target_path.with_suffix(".jpg")
-            download_file(url, jpeg_path.as_posix())
+            logger.info("🔄 ASYNC DOWNLOAD START for job {}: {} -> {}", 
+                       job_id, url[:80], target_path)
+            # Determine file extension from URL or use target_path extension
+            # Check URL for common image extensions
+            url_lower = url.lower()
+            if url_lower.endswith(".webp"):
+                download_path = target_path.with_suffix(".webp")
+            elif url_lower.endswith(".png"):
+                download_path = target_path.with_suffix(".png")
+            elif url_lower.endswith(".jpg") or url_lower.endswith(".jpeg"):
+                download_path = target_path.with_suffix(".jpg")
+            else:
+                # Use target_path extension if URL doesn't have one
+                download_path = target_path
+            
+            _download_file_with_retry(url, download_path.as_posix())
 
-            if jpeg_path.exists():
-                file_size = jpeg_path.stat().st_size
-                logger.info("Background download completed for job {}: {} bytes (JPEG)", 
-                           job_id, file_size)
+            if download_path.exists():
+                file_size = download_path.stat().st_size
+                logger.info("✅ ASYNC DOWNLOAD COMPLETE for job {}: {} bytes ({:.2f} KB) saved to {}", 
+                           job_id, file_size, file_size / 1024, download_path)
+
+                # Convert webp to PNG if needed (for upscale operations)
+                final_path = download_path
+                if download_path.suffix.lower() == ".webp":
+                    try:
+                        png_path = target_path.with_suffix(".png")
+                        logger.info("🔄 Converting webp to PNG: {} -> {}", download_path, png_path)
+                        
+                        # Check if webp file exists
+                        if not download_path.exists():
+                            logger.error("⚠️ Webp file does not exist: {}", download_path)
+                        else:
+                            logger.info("📂 Opening webp file: {} (size: {} bytes)", download_path, download_path.stat().st_size)
+                            
+                            with Image.open(download_path) as img:
+                                logger.info("🖼️ Image opened: mode={}, size={}", img.mode, img.size)
+                                
+                                # Convert RGBA to RGB if needed (remove alpha channel for better compatibility)
+                                if img.mode in ("RGBA", "LA", "P"):
+                                    logger.info("🔄 Converting {} mode to RGB", img.mode)
+                                    # Create white background
+                                    rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                    if img.mode == "P":
+                                        img = img.convert("RGBA")
+                                    rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                    converted_img = rgb_img
+                                elif img.mode != "RGB":
+                                    logger.info("🔄 Converting {} mode to RGB", img.mode)
+                                    converted_img = img.convert("RGB")
+                                else:
+                                    logger.info("✅ Image already in RGB mode, copying")
+                                    converted_img = img.copy()
+                                
+                                logger.info("💾 Saving PNG file to: {}", png_path)
+                                # Save PNG file
+                                try:
+                                    converted_img.save(png_path, "PNG", optimize=False)
+                                    logger.info("✅ PNG file saved successfully")
+                                except Exception as save_exc:  # noqa: BLE001
+                                    logger.error("❌ Failed to save PNG file: {}", save_exc, exc_info=True)
+                                    raise
+                            
+                            # Remove original webp file
+                            logger.info("🗑️ Removing original webp file: {}", download_path)
+                            download_path.unlink()
+                            final_path = png_path
+                            png_size = png_path.stat().st_size
+                            logger.info("✅ Converted to PNG: {} bytes ({:.2f} KB) saved to {}", 
+                                       png_size, png_size / 1024, png_path)
+                    except Exception as conv_exc:  # noqa: BLE001
+                        logger.error("⚠️ Failed to convert webp to PNG: {}, keeping original webp", conv_exc, exc_info=True)
 
                 # Update job metadata
                 redis_job = get_job(job_id)
                 if redis_job:
                     meta = redis_job.meta or {}
-                    meta["result_path"] = jpeg_path.as_posix()
+                    meta["result_path"] = final_path.as_posix()
                     redis_job.meta = meta
                     redis_job.save_meta()
             else:
-                logger.warning("Downloaded file does not exist: {}", jpeg_path)
+                logger.warning("❌ ASYNC DOWNLOAD: file does not exist after download: {}", download_path)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Failed to cache result for job {}: {}", job_id, exc)
+            logger.warning("❌ ASYNC DOWNLOAD FAILED for job {}: {}", job_id, exc, exc_info=True)
 
+    logger.info("🔄 SCHEDULING async download for job {} (background thread)", job_id)
     threading.Thread(
         target=_worker,
         name=f"fal-download-{job_id}",
@@ -175,95 +391,18 @@ def _send_success_notification_sync(
             reply_markup=reply_markup_dict,
         )
     elif image_url:
-        # ВАЖНО: Telegram сжимает изображения при отправке по URL
-        # Для nano-banana-pro отправляем по URL напрямую, чтобы избежать долгого ожидания
-        # Для других моделей скачиваем локально для лучшего качества
-        from app.providers.fal.client import download_file
-        import tempfile
-        
-        # Проверяем, не является ли это nano-banana-pro (может быть долгое скачивание)
-        is_nano_banana_pro_url = "nano-banana-pro" in image_url.lower()
-        
-        if is_nano_banana_pro_url:
-            # Для nano-banana-pro отправляем по URL напрямую - быстрее
-            logger.info("Nano Banana Pro detected in URL, sending directly by URL to avoid long download: {}", image_url[:100])
-            sent_message_id = send_document_sync(
-                chat_id=notify["chat_id"],
-                document=image_url,
-                caption=caption,
-                reply_to_message_id=notify.get("reply_to_message_id"),
-                message_thread_id=notify.get("message_thread_id"),
-                reply_markup=reply_markup_dict,
-            )
-        else:
-            # Для других моделей скачиваем локально для лучшего качества
-            logger.info("Image URL provided, downloading to preserve quality (Telegram compresses URLs): {}", image_url[:100])
-            try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_file:
-                    tmp_path = tmp_file.name
-
-                # Скачиваем с таймаутом (максимум 30 секунд для обычных файлов)
-                logger.info("Starting download to temp file: {}", tmp_path)
-                download_file(image_url, tmp_path)
-
-                if Path(tmp_path).exists() and Path(tmp_path).stat().st_size > 0:
-                    file_size_kb = Path(tmp_path).stat().st_size / 1024
-                    logger.info("Downloaded image from URL: size = {:.2f} KB ({} bytes)", file_size_kb, Path(tmp_path).stat().st_size)
-                    with open(tmp_path, "rb") as f:
-                        image_bytes = f.read()
-                    # Удаляем временный файл
-                    Path(tmp_path).unlink()
-                    logger.info("Sending downloaded image as bytes: size = {:.2f} KB ({} bytes), chat_id={}", 
-                               len(image_bytes) / 1024, len(image_bytes), notify["chat_id"])
-                    try:
-                        sent_message_id = send_document_sync(
-                            chat_id=notify["chat_id"],
-                            document=image_bytes,
-                            filename=filename or "image.png",
-                            caption=caption,
-                            reply_to_message_id=notify.get("reply_to_message_id"),
-                            message_thread_id=notify.get("message_thread_id"),
-                            reply_markup=reply_markup_dict,
-                        )
-                        if sent_message_id:
-                            logger.info("Successfully sent image to Telegram: message_id={}, chat_id={}", 
-                                       sent_message_id, notify["chat_id"])
-                        else:
-                            logger.warning("Failed to send image to Telegram (send_document_sync returned None), chat_id={}", 
-                                          notify["chat_id"])
-                    except Exception as send_exc:
-                        logger.error("Exception while sending image to Telegram: {}, chat_id={}", 
-                               send_exc, notify["chat_id"], exc_info=True)
-                        sent_message_id = None
-                else:
-                    logger.warning("Downloaded file does not exist or is empty: {}, falling back to URL send", tmp_path)
-                    if Path(tmp_path).exists():
-                        Path(tmp_path).unlink()
-                    sent_message_id = send_document_sync(
-                        chat_id=notify["chat_id"],
-                        document=image_url,
-                        caption=caption,
-                        reply_to_message_id=notify.get("reply_to_message_id"),
-                        message_thread_id=notify.get("message_thread_id"),
-                        reply_markup=reply_markup_dict,
-                    )
-            except Exception as exc:
-                logger.error("Failed to download image from URL, falling back to URL send: {}", exc, exc_info=True)
-                # Очищаем временный файл если он существует
-                if 'tmp_path' in locals() and Path(tmp_path).exists():
-                    try:
-                        Path(tmp_path).unlink()
-                    except Exception:
-                        pass
-                # Fallback: отправляем по URL (Telegram может сжать)
-                sent_message_id = send_document_sync(
-                    chat_id=notify["chat_id"],
-                    document=image_url,
-                    caption=caption,
-                    reply_to_message_id=notify.get("reply_to_message_id"),
-                    message_thread_id=notify.get("message_thread_id"),
-                    reply_markup=reply_markup_dict,
-                )
+        # Для всех моделей отправляем по URL напрямую
+        # Это избегает двойного скачивания - асинхронное скачивание уже запущено для кеширования
+        # Telegram скачает файл сам, а мы кешируем его в фоне для будущего использования
+        logger.info("📤 Sending by URL directly (async download in background, Telegram will download): {}", image_url[:100])
+        sent_message_id = send_document_sync(
+            chat_id=notify["chat_id"],
+            document=image_url,
+            caption=caption,
+            reply_to_message_id=notify.get("reply_to_message_id"),
+            message_thread_id=notify.get("message_thread_id"),
+            reply_markup=reply_markup_dict,
+        )
 
     # Промпт больше не отправляется отдельным сообщением - только короткий заголовок в caption
 
@@ -449,18 +588,15 @@ def process_face_swap_job(
             # Проверяем API ключ из переменной окружения напрямую, если в настройках его нет
             wavespeed_api_key = current_settings.wavespeed_api_key or os.getenv("WAVESPEED_API_KEY")
             if not wavespeed_api_key:
-                error_msg = (
-                    "❌ Сервис WaveSpeed Face Swap временно недоступен.\n\n"
-                    "Попробуйте использовать базовую модель «🔄 Face Swap» или обратитесь в техническую поддержку."
-                )
-                logger.error("Face swap job {}: WaveSpeedAI API key not configured (env: {}, settings: {})", 
+                # Автоматически переключаемся на базовую модель Fal.ai, если ключ WaveSpeedAI не настроен
+                logger.warning("Face swap job {}: WaveSpeedAI API key not configured (env: {}, settings: {}), falling back to Fal.ai model", 
                             job_id, os.getenv("WAVESPEED_API_KEY"), current_settings.wavespeed_api_key)
-                if job:
-                    job.meta["error"] = error_msg
-                    job.save_meta()
-                if notify_options.get("chat_id"):
-                    _send_failure_notification_sync(notify_options, job_id, error_msg)
-                raise RuntimeError("WaveSpeedAI API key not configured")
+                logger.info("Face swap job {}: Switching from WaveSpeedAI model '{}' to Fal.ai model '{}'", 
+                           job_id, model_name, current_settings.fal_face_swap_model)
+                # Переключаемся на базовую модель
+                model_name = current_settings.fal_face_swap_model
+                is_advanced_model = False
+                # Продолжаем выполнение с базовой моделью Fal.ai
 
             logger.info("Face swap job {} using WaveSpeedAI for advanced model", job_id)
             try:
@@ -472,20 +608,14 @@ def process_face_swap_job(
                     model=current_settings.wavespeed_face_swap_model,  # Явно передаем модель из настроек
                 )
                 logger.info("Face swap job {} successfully completed via WaveSpeedAI: {}", job_id, result_url[:50])
-                # Скачиваем результат
-                download_file(result_url, output_file.as_posix())
-
-                # Определяем расширение файла на основе URL (WaveSpeedAI возвращает .jpeg или .png)
-                # Если URL содержит .jpeg или .jpg, меняем расширение output_file
-                if ".jpeg" in result_url.lower() or ".jpg" in result_url.lower():
-                    # Меняем расширение на .jpg для JPEG файлов
-                    output_file_jpeg = output_file.with_suffix(".jpg")
-                    if output_file != output_file_jpeg:
-                        # Переименовываем файл, если расширение отличается
-                        if output_file.exists():
-                            output_file.rename(output_file_jpeg)
-                            output_file = output_file_jpeg
-                            logger.debug("Face swap job {}: renamed output file to {}", job_id, output_file)
+                # Скачиваем результат напрямую в PNG (API должен вернуть PNG благодаря параметру output_format)
+                # Убеждаемся, что output_file имеет расширение .png
+                if output_file.suffix.lower() != ".png":
+                    output_file = output_file.with_suffix(".png")
+                    logger.debug("Face swap job {}: ensuring output file has .png extension: {}", job_id, output_file)
+                
+                _download_file_with_retry(result_url, output_file.as_posix())
+                logger.info("Face swap job {}: downloaded result as PNG ({} bytes)", job_id, output_file.stat().st_size if output_file.exists() else 0)
 
                 # Отправляем результат в Telegram
                 if notify_options.get("chat_id"):
@@ -897,6 +1027,21 @@ def process_face_swap_job(
                 db.close()
 
         return caption_path
+    except JobTimeoutException as timeout_exc:
+        # Обработка таймаута задачи - отправляем уведомление пользователю
+        logger.error("Face swap job {} timed out after 4 minutes", job_id)
+        _handle_job_timeout(job_id, notify_options, "замены лица")
+        # Mark operation as failed
+        if operation_id:
+            db = SessionLocal()
+            try:
+                BillingService.fail_operation(db, operation_id)
+                logger.info("Marked operation {} as failed for face swap job {} due to timeout", operation_id, job_id)
+            except Exception as fail_error:
+                logger.error("Error failing operation {} for face swap job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+            finally:
+                db.close()
+        raise
     except Exception as e:
         # Mark operation as failed on any error
         if operation_id:
@@ -911,6 +1056,50 @@ def process_face_swap_job(
         raise
 
 
+def _enhance_flux2flex_prompt_for_cyrillic(prompt: str) -> str:
+    """
+    Улучшает промпт для Flux 2 Flex для лучшей генерации кириллицы.
+    Добавляет оптимизированные инструкции для четкого и читаемого русского текста.
+    """
+    # Проверяем, есть ли в промпте упоминания о тексте на русском
+    has_russian_text_instruction = any(keyword in prompt.lower() for keyword in [
+        'текст', 'надпись', 'написано', 'шрифт', 'буквы', 'надписи', 'надпись на русском',
+        'русском языке', 'на русском', 'кириллицей', 'кириллица'
+    ])
+    
+    if not has_russian_text_instruction:
+        # Если в промпте нет упоминаний о тексте, возвращаем как есть
+        return prompt
+    
+    # Добавляем оптимизированные инструкции для лучшей генерации кириллицы
+    # Используем более детальные и конкретные инструкции
+    enhancement = (
+        "\n\nКРИТИЧЕСКИ ВАЖНО для генерации русского текста: "
+        "Все надписи и текст на русском языке должны быть: "
+        "максимально четкими и резкими (sharp, crisp), "
+        "полностью разборчивыми (fully legible), "
+        "с очень высоким контрастом (very high contrast), "
+        "с правильными кириллическими буквами без искажений (correct Cyrillic letters without distortions), "
+        "хорошо читаемыми (highly readable), "
+        "в идеальном фокусе (perfect focus), "
+        "с четкими и резкими краями букв (sharp letter edges), "
+        "без размытия (no blur), "
+        "без опечаток (no typos), "
+        "без замены букв (no letter substitutions), "
+        "с правильной кириллицей (correct Cyrillic alphabet). "
+        "Текст должен быть визуально выделен (visually prominent), "
+        "иметь достаточный размер для комфортного чтения (adequate size for comfortable reading), "
+        "иметь контрастный фон для максимальной читаемости (contrasting background for maximum legibility), "
+        "каждая буква должна быть четко различима (each letter must be clearly distinguishable)."
+    )
+    
+    # Добавляем улучшение только если его еще нет в промпте
+    if "максимально четкими" not in prompt.lower() and "критически важно" not in prompt.lower():
+        return prompt + enhancement
+    
+    return prompt
+
+
 def process_image_job(job_id: str, prompt: str, options: dict | None, output_path: str) -> str:
     # Import models to ensure they are registered with Base.metadata
     from app.db import models  # noqa: F401
@@ -923,7 +1112,27 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
     logger.info("Image job {}: operation_id_raw from options: {} (type: {})", 
                job_id, operation_id_raw, type(operation_id_raw).__name__ if operation_id_raw is not None else "None")
     operation_id = _parse_operation_id(operation_id_raw, job_id, "Image")
-    provider_prompt = provider_options.pop("provider_prompt", prompt)
+    
+    # КРИТИЧЕСКИ ВАЖНО: Проверяем модель ПЕРЕД извлечением provider_prompt, чтобы сразу установить правильный промпт
+    model_name = provider_options.get("model", "")
+    selected_model = provider_options.get("selected_model", "")
+    is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
+    is_flux2flex = "flux-2-flex" in model_name.lower() or selected_model == "flux2flex-create"
+    
+    # Для Nano Banana, Flux 2 Flex используем оригинальный русский промпт БЕЗ перевода
+    if is_nano_banana or is_flux2flex:
+        provider_prompt = prompt  # Используем оригинальный русский промпт
+        if is_nano_banana:
+            logger.info("Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
+        elif is_flux2flex:
+            logger.info("Image job {}: Flux 2 Flex model detected, using original Russian prompt without translation", job_id)
+            # Улучшаем промпт для Flux 2 Flex для лучшей генерации кириллицы
+            provider_prompt = _enhance_flux2flex_prompt_for_cyrillic(prompt)
+            logger.info("Image job {}: Enhanced Flux 2 Flex prompt for better Cyrillic text generation", job_id)
+    else:
+        # Для других моделей извлекаем provider_prompt из options (может быть переведен в боте)
+        provider_prompt = provider_options.pop("provider_prompt", prompt)
+    
     output_file = Path(output_path)
     job = get_current_job()
     if job:
@@ -957,36 +1166,57 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
 
             logger.info("Image job {}: Using Nano Banana Pro with original Russian prompt: '{}'", job_id, prompt[:50])
 
-        # Проверяем, является ли модель Nano-banana (может принимать русский текст)
-        model_name = provider_options.get("model", "")
-        is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
-
-        if provider_prompt != prompt:
-            logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
-        elif is_nano_banana:
-            # Для Nano-banana не переводим промпт, используем оригинальный русский
-            logger.info("Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
-            provider_prompt = prompt  # Используем оригинальный промпт без перевода
-        else:
-            # Если перевод не сработал, попробуем перевести здесь еще раз
-            # Проверяем, содержит ли промпт кириллицу (признак русского текста)
-            has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
-            logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
-            if has_cyrillic:
-                logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
-                try:
-                    translated = translate_to_english(prompt)
-                    if translated != prompt and translated:
-                        logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
-                                   job_id, prompt[:50], translated[:50])
-                        provider_prompt = translated
-                    else:
-                        logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
-                except Exception as exc:
-                    logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
+        # ВАЖНО: Для моделей, которые поддерживают русский (Nano Banana, Flux 2 Flex),
+        # provider_prompt уже установлен в русском варианте выше, НЕ ПЕРЕВОДИМ!
+        # Для остальных моделей проверяем, нужно ли переводить
+        if not (is_nano_banana or is_flux2flex):
+            if provider_prompt != prompt:
+                logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
+            else:
+                # Если перевод не сработал, попробуем перевести здесь еще раз
+                # Проверяем, содержит ли промпт кириллицу (признак русского текста)
+                has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
+                logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
+                if has_cyrillic:
+                    logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
+                    try:
+                        translated = translate_to_english(prompt)
+                        if translated != prompt and translated:
+                            logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
+                                       job_id, prompt[:50], translated[:50])
+                            provider_prompt = translated
+                        else:
+                            logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
+                    except Exception as exc:
+                        logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
 
         # Используем обычную логику через очередь для всех моделей
         model_name = provider_options.get("model", "")
+        
+        # Применяем настройки качества для Flux 2 Flex (оптимальные значения для естественного вида)
+        if is_flux2flex:
+            # Используем оптимальные значения для более естественного вида изображений
+            # Слишком высокие значения приводят к передетализации и неестественному виду
+            current_guidance = provider_options.get("guidance_scale", 5.0)
+            if current_guidance > 7.0:
+                # Ограничиваем до 7.0 для более естественного вида (было 10.0 - слишком детализировано)
+                provider_options["guidance_scale"] = 7.0
+                logger.info("Image job {}: Limited guidance_scale to 7.0 for Flux 2 Flex (was {}) to avoid over-detailing", job_id, current_guidance)
+            elif current_guidance < 3.5:
+                # Минимальное значение для приемлемого качества
+                provider_options["guidance_scale"] = 3.5
+                logger.info("Image job {}: Set guidance_scale to 3.5 (min for Flux 2 Flex) for acceptable quality", job_id)
+            
+            # Также ограничиваем num_inference_steps для более естественного вида
+            current_steps = provider_options.get("num_inference_steps", 28)
+            if current_steps > 35:
+                # Ограничиваем до 35 для более естественного вида (было 50 - слишком детализировано)
+                provider_options["num_inference_steps"] = 35
+                logger.info("Image job {}: Limited num_inference_steps to 35 for Flux 2 Flex (was {}) to avoid over-detailing", job_id, current_steps)
+            elif current_steps < 20:
+                # Минимальное значение для приемлемого качества
+                provider_options["num_inference_steps"] = 20
+                logger.info("Image job {}: Set num_inference_steps to 20 (min for Flux 2 Flex) for acceptable quality", job_id)
         
         # Применяем настройки качества для nano-banana (обычный и pro)
         is_nano_banana_regular = model_name == "fal-ai/nano-banana" or ("nano-banana" in model_name.lower() and "pro" not in model_name.lower())
@@ -1032,10 +1262,17 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
             max_attempts = 45  # 3 минуты при интервале 4 сек (45 * 4 = 180 секунд)
             poll_interval = 4.0  # Интервал 4 секунды для проверки статуса
             status: dict[str, Any]
+            logger.info("📡 POLLING START for job {} (task_id: {}): max_attempts={}, interval={}s", 
+                       job_id, task_id[:8] if task_id else "None", max_attempts, poll_interval)
             while True:
+                poll_attempts += 1
+                logger.debug("📡 POLLING attempt {}/{} for job {} (task_id: {})", 
+                           poll_attempts, max_attempts, job_id, task_id[:8] if task_id else "None")
                 status = check_image_status(task_id)
                 current_status = status.get("status")
                 if current_status == "succeeded":
+                    logger.info("📡 POLLING COMPLETE for job {}: succeeded after {} attempts ({} API requests)", 
+                               job_id, poll_attempts, poll_attempts)
                     break
                 if current_status == "failed":
                     error = status.get("error", "Unknown error")
@@ -1046,16 +1283,19 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                     if notify_options.get("chat_id"):
                         _send_failure_notification_sync(notify_options, job_id, str(error))
                     raise RuntimeError(error)
-                poll_attempts += 1
                 if poll_attempts >= max_attempts:
                     error = f"fal request did not complete within {int(max_attempts * poll_interval)} seconds"
-                    logger.error("Image job {} timed out waiting for fal result", job_id)
+                    logger.error("📡 POLLING TIMEOUT for job {}: {} attempts ({} API requests)", 
+                               job_id, poll_attempts, poll_attempts)
                     if job:
                         job.meta["error"] = error
                         job.save_meta()
                     if notify_options.get("chat_id"):
                         _send_failure_notification_sync(notify_options, job_id, error)
                     raise RuntimeError(error)
+                if poll_attempts % 5 == 0:  # Логируем каждые 5 попыток
+                    logger.info("📡 POLLING progress for job {}: attempt {}/{}, status={}", 
+                               job_id, poll_attempts, max_attempts, current_status)
                 time.sleep(poll_interval)
 
         # Получаем результат после завершения
@@ -1167,17 +1407,53 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                         except Exception as exc:  # noqa: BLE001
                             last_result_error = exc
                             logger.error("Image job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
+                            # Проверяем, не является ли это ошибкой content policy violation
+                            error_str = str(exc)
+                            if "content policy violation" in error_str.lower() or "content checker" in error_str.lower():
+                                # Это ошибка политики контента - отправляем понятное сообщение пользователю
+                                user_error_msg = (
+                                    "❌ Запрос отклонен системой безопасности.\n\n"
+                                    "Ваш промпт содержит контент, который не может быть обработан из-за политики безопасности.\n\n"
+                                    "Попробуйте изменить промпт, убрав или изменив проблемные элементы."
+                                )
+                                logger.warning("Image job {} rejected by content policy", job_id)
+                                if job:
+                                    job.meta["error"] = "Content policy violation"
+                                    job.save_meta()
+                                if notify_options.get("chat_id"):
+                                    _send_failure_notification_sync(notify_options, job_id, user_error_msg)
+                                raise RuntimeError("Content policy violation") from exc
                             if result_attempt >= max_result_attempts - 1:
                                 raise
 
                     if asset is None:
                         error = last_result_error or RuntimeError("Failed to get image result")
+                        error_str = str(error)
                         logger.error("Image job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
+                        
+                        # Формируем понятное сообщение для пользователя в зависимости от типа ошибки
+                        if "content policy violation" in error_str.lower() or "content checker" in error_str.lower():
+                            user_error_msg = (
+                                "❌ Запрос отклонен системой безопасности.\n\n"
+                                "Ваш промпт содержит контент, который не может быть обработан из-за политики безопасности.\n\n"
+                                "Попробуйте изменить промпт, убрав или изменив проблемные элементы."
+                            )
+                        elif "fal response did not include an image url" in error_str.lower():
+                            user_error_msg = (
+                                "❌ Не удалось получить изображение.\n\n"
+                                "Сервис генерации не вернул результат. Возможные причины:\n"
+                                "• Запрос был отклонен системой безопасности\n"
+                                "• Временные проблемы с сервисом\n\n"
+                                "Попробуйте изменить промпт или повторить запрос позже."
+                            )
+                        else:
+                            user_error_msg = f"Не удалось получить результат: {error}"
+                        
                         if job:
                             job.meta["error"] = str(error)
                             job.save_meta()
                         if notify_options.get("chat_id"):
-                            _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
+                            _send_failure_notification_sync(notify_options, job_id, user_error_msg)
                         raise RuntimeError(str(error))
 
         image_url = asset.url
@@ -1185,57 +1461,31 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
         filename = asset.filename
         saved_path = None
 
-        # Для nano-banana-pro всегда отправляем по URL, без скачивания, чтобы ускорить отправку
-        # ИСКЛЮЧЕНИЕ: если указан selected_format, нужно скачать и преобразовать изображение
-        is_nano_banana_pro = model_name == "fal-ai/nano-banana-pro" or "nano-banana-pro" in model_name.lower()
-        is_nano_banana = model_name == "fal-ai/nano-banana" or ("nano-banana" in model_name.lower() and "pro" not in model_name.lower())
-        selected_format = provider_options.get("selected_format")
-        needs_format_conversion = selected_format is not None
+        # Для всех моделей используем асинхронное скачивание, кроме случаев когда:
+        # 1. Изображение уже в памяти (image_bytes) - сохраняем синхронно (быстро, не блокирует)
         
-        # Для nano-banana (обычный) всегда нужно преобразование формата, так как модель
-        # может вернуть изображение с неточным соотношением сторон (например, 864x1184 вместо 3:4)
-        if is_nano_banana and selected_format:
-            needs_format_conversion = True
+        # Модели получают aspect_ratio в параметрах запроса и возвращают изображение с правильным соотношением сторон
+        # Дополнительное преобразование формата не требуется
         
-        if is_nano_banana_pro and not needs_format_conversion:
-            # Для nano-banana-pro без преобразования формата пропускаем скачивание и сохраняем только URL
-            logger.info("Image job {}: Nano Banana Pro detected, skipping download, will send by URL directly", job_id)
+        if image_bytes is not None:
+            # Изображение уже в памяти - сохраняем синхронно (быстро)
+            file_size_kb = len(image_bytes) / 1024
+            logger.info("💾 Image job {}: saving from memory ({} bytes, {:.2f} KB) - no download needed", 
+                       job_id, len(image_bytes), file_size_kb)
+            saved_path = _persist_asset(asset, output_file.as_posix())
+            if saved_path and saved_path.exists():
+                saved_size_kb = saved_path.stat().st_size / 1024
+                logger.info("✅ Image job {}: saved to disk - {:.2f} KB ({} bytes)", 
+                           job_id, saved_size_kb, saved_path.stat().st_size)
+        elif image_url:
+            # Для всех моделей используем асинхронное скачивание
+            # Отправляем по URL сразу, скачивание идет в фоне
+            logger.info("🔄 Image job {}: ASYNC MODE - sending by URL immediately, download in background", job_id)
             saved_path = None
-            # Планируем фоновое скачивание для кеширования, но не блокируем отправку
-            if image_url:
-                _schedule_result_download(job_id, image_url, output_file)
-        elif is_nano_banana_pro and needs_format_conversion:
-            # Для nano-banana-pro с преобразованием формата нужно скачать изображение
-            logger.info("Image job {}: Nano Banana Pro with format conversion, downloading image first", job_id)
-            if image_bytes is not None:
-                # Изображение уже в памяти
-                saved_path = _persist_asset(asset, output_file.as_posix())
-            elif image_url:
-                # Скачиваем изображение
-                saved_path = _persist_asset(asset, output_file.as_posix())
-            else:
-                saved_path = None
-        elif is_nano_banana:
-            # Для nano-banana используем изображение как есть, без обрезки/ресайза
-            # Модель получает aspect_ratio и возвращает изображение нужного размера
-            logger.info("Image job {}: Nano Banana detected, using image as-is from model (no post-processing)", job_id)
-            if image_bytes is not None:
-                saved_path = _persist_asset(asset, output_file.as_posix())
-            elif image_url:
-                saved_path = _persist_asset(asset, output_file.as_posix())
-            else:
-                saved_path = None
+            # Планируем фоновое скачивание для кеширования
+            _schedule_result_download(job_id, image_url, output_file)
         else:
-            # Логируем размер файла для диагностики
-            if image_bytes is not None:
-                file_size_kb = len(image_bytes) / 1024
-                logger.info("Image job {}: image_bytes size = {:.2f} KB ({} bytes)", job_id, file_size_kb, len(image_bytes))
-                saved_path = _persist_asset(asset, output_file.as_posix())
-                if saved_path and saved_path.exists():
-                    saved_size_kb = saved_path.stat().st_size / 1024
-                    logger.info("Image job {}: saved file size = {:.2f} KB ({} bytes)", job_id, saved_size_kb, saved_path.stat().st_size)
-                elif image_url:
-                    logger.info("Image job {}: image_url = {} (no inline content)", job_id, image_url[:100] if image_url else "None")
+            saved_path = None
 
         if job:
             if image_url:
@@ -1250,10 +1500,7 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                 job.meta["result_path"] = None
             job.save_meta()
 
-        # Планируем фоновое скачивание только если файл еще не сохранен и это не nano-banana-pro
-        # (для nano-banana-pro скачивание уже запланировано выше)
-        if saved_path is None and image_url and not is_nano_banana_pro:
-            _schedule_result_download(job_id, image_url, output_file)
+        # Фоновое скачивание уже запланировано выше для всех моделей (кроме случаев с image_bytes)
 
         logger.success("Image job {} completed: {}", job_id, image_url or filename or "binary")
         if notify_options.get("chat_id"):
@@ -1287,11 +1534,10 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                         reply_markup=reply_markup,
                     )
                 else:
-                    # Для nano-banana-pro без преобразования формата отправляем по URL напрямую для максимальной скорости
-                    # Фоновое скачивание уже запланировано и завершится позже
-                    # Для nano-banana-pro с преобразованием формата уже должно быть saved_path
-                    if is_nano_banana_pro and not needs_format_conversion:
-                        logger.info("Nano Banana Pro: sending by URL directly (background download in progress): {}", image_url[:100] if image_url else "None")
+                    # Для всех моделей с асинхронным скачиванием отправляем по URL напрямую
+                    # Это избегает двойного скачивания (асинхронное уже запущено для кеширования)
+                    # Telegram скачает файл сам, а мы кешируем его в фоне
+                    logger.info("📤 Sending by URL directly (async download in background, no duplicate download): {}", image_url[:100] if image_url else "None")
                     _send_success_notification_sync(
                         notify_options,
                         job_id,
@@ -1303,8 +1549,20 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
 
         # Confirm operation after successful completion
         if operation_id:
+            # Используем DATABASE_URL из настроек (PostgreSQL или SQLite)
             db = SessionLocal()
             try:
+                logger.info("Confirming operation {} for job {}: using DATABASE_URL from settings", operation_id, job_id)
+                
+                # Проверяем, существует ли операция перед подтверждением
+                from app.db.models import Operation
+                operation_check = db.query(Operation).filter(Operation.id == operation_id).first()
+                if operation_check:
+                    logger.info("Operation {} found: status={}, type={}, user_id={}", 
+                               operation_id, operation_check.status, operation_check.type, operation_check.user_id)
+                else:
+                    logger.warning("Operation {} not found in database, will try to confirm anyway", operation_id)
+                
                 success = BillingService.confirm_operation(db, operation_id)
                 if success:
                     logger.info("Confirmed operation {} for job {}", operation_id, job_id)
@@ -1316,13 +1574,76 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                 db.close()
 
         return image_url or ""
+    except JobTimeoutException as timeout_exc:
+        # Обработка таймаута задачи - отправляем уведомление пользователю
+        logger.error("Image job {} timed out after 4 minutes", job_id)
+        _handle_job_timeout(job_id, notify_options, "генерации изображения")
+        # Mark operation as failed
+        if operation_id:
+            db = SessionLocal()
+            try:
+                BillingService.fail_operation(db, operation_id)
+                logger.info("Marked operation {} as failed for job {} due to timeout", operation_id, job_id)
+            except Exception as fail_error:
+                logger.error("Error failing operation {} for job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+            finally:
+                db.close()
+        raise
     except Exception as e:
+        error_str = str(e)
+        error_type = type(e).__name__
+        
+        # Формируем понятное сообщение для пользователя в зависимости от типа ошибки
+        user_error_msg = None
+        
+        if "content policy violation" in error_str.lower() or "content checker" in error_str.lower():
+            user_error_msg = (
+                "❌ Запрос отклонен системой безопасности.\n\n"
+                "Ваш промпт содержит контент, который не может быть обработан из-за политики безопасности.\n\n"
+                "Попробуйте изменить промпт, убрав или изменив проблемные элементы."
+            )
+        elif "fal response did not include an image url" in error_str.lower():
+            user_error_msg = (
+                "❌ Не удалось получить изображение.\n\n"
+                "Сервис генерации не вернул результат. Возможные причины:\n"
+                "• Запрос был отклонен системой безопасности\n"
+                "• Временные проблемы с сервисом\n\n"
+                "Попробуйте изменить промпт или повторить запрос позже."
+            )
+        elif isinstance(e, httpx.HTTPStatusError):
+            status_code = e.response.status_code if hasattr(e, 'response') else None
+            if status_code == 422:
+                user_error_msg = (
+                    "❌ Некорректные параметры запроса.\n\n"
+                    "Запрос был отклонен сервисом. Возможные причины:\n"
+                    "• Промпт содержит контент, нарушающий политику безопасности\n"
+                    "• Некорректные параметры генерации\n\n"
+                    "Попробуйте изменить промпт или параметры."
+                )
+            elif status_code == 429:
+                user_error_msg = (
+                    "❌ Превышен лимит запросов.\n\n"
+                    "Слишком много запросов к сервису генерации. Пожалуйста, подождите немного и попробуйте снова."
+                )
+            elif status_code in (500, 502, 503):
+                user_error_msg = (
+                    "❌ Временная проблема с сервисом.\n\n"
+                    "Сервис генерации временно недоступен. Пожалуйста, попробуйте позже."
+                )
+        
+        # Если есть понятное сообщение для пользователя, отправляем его
+        if user_error_msg and notify_options and notify_options.get("chat_id"):
+            try:
+                _send_failure_notification_sync(notify_options, job_id, user_error_msg)
+            except Exception as notify_exc:
+                logger.error("Failed to send error notification for job {}: {}", job_id, notify_exc)
+        
         # Mark operation as failed on any error
         if operation_id:
             db = SessionLocal()
             try:
                 BillingService.fail_operation(db, operation_id)
-                logger.info("Marked operation {} as failed for job {} due to error", operation_id, job_id)
+                logger.info("Marked operation {} as failed for job {} due to error: {}", operation_id, job_id, error_type)
             except Exception as fail_error:
                 logger.error("Error failing operation {} for job {}: {}", operation_id, job_id, fail_error, exc_info=True)
             finally:
@@ -1351,6 +1672,13 @@ def process_image_edit_job(
     provider_prompt = provider_options.pop("provider_prompt", prompt)
     model_name = provider_options.setdefault("model", settings.fal_edit_model)
     requires_mask = model_requires_mask(model_name)
+    
+    # Для Seedream edit убираем enhance_prompt_mode, чтобы промпт передавался как есть без дополнительных модификаций
+    # Это помогает модели лучше понимать простые запросы пользователя
+    if "seedream" in model_name.lower() and "/edit" in model_name.lower():
+        if "enhance_prompt_mode" in provider_options:
+            logger.info("Edit job {}: Removing enhance_prompt_mode for Seedream edit to improve prompt understanding", job_id)
+            provider_options.pop("enhance_prompt_mode", None)
 
     notify_options = _extract_notify_options(provider_options)
     output_file = Path(output_path)
@@ -1626,6 +1954,21 @@ def process_image_edit_job(
             logger.warning("Image edit job {}: no operation_id provided, skipping billing confirmation", job_id)
 
         return image_url or ""
+    except JobTimeoutException as timeout_exc:
+        # Обработка таймаута задачи - отправляем уведомление пользователю
+        logger.error("Image edit job {} timed out after 4 minutes", job_id)
+        _handle_job_timeout(job_id, notify_options, "редактирования изображения")
+        # Mark operation as failed
+        if operation_id:
+            db = SessionLocal()
+            try:
+                BillingService.fail_operation(db, operation_id)
+                logger.info("Marked operation {} as failed for edit job {} due to timeout", operation_id, job_id)
+            except Exception as fail_error:
+                logger.error("Error failing operation {} for edit job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+            finally:
+                db.close()
+        raise
     except Exception as e:
         # Mark operation as failed on any error
         if operation_id:
@@ -1668,6 +2011,9 @@ def process_retoucher_job(
     source_file = Path(image_path)
 
     job = get_current_job()
+    
+    # Инициализируем asset = None, чтобы избежать UnboundLocalError
+    asset = None
 
     try:
         if job:
@@ -1732,17 +2078,22 @@ def process_retoucher_job(
                 _send_failure_notification_sync(notify_options, job_id, error)
             raise RuntimeError(error)
 
-        # Для Nano Banana edit используем асинхронный режим (как в кнопке "Изменить"),
-        # так как синхронный режим блокирует worker'ы при высокой нагрузке
-        # Асинхронный режим работает через queue_result с базовым путем fal-ai/nano-banana
-        if False and mode == "enhance" and ("nano-banana" in model_name.lower() and "pro" not in model_name.lower() and "/edit" in model_name.lower()):
+        # Для Nano Banana edit в режиме "enhance" используем синхронный режим
+        is_nano_banana_edit_enhance = (
+            mode == "enhance" and 
+            "nano-banana" in model_name.lower() and 
+            "/edit" in model_name.lower() and 
+            "pro" not in model_name.lower()
+        )
+        
+        if is_nano_banana_edit_enhance:
             # Применяем настройки качества для Nano Banana edit (обычный)
-            provider_options["num_inference_steps"] = 60
-            provider_options["guidance_scale"] = 9.0
+            provider_options.setdefault("num_inference_steps", 90)
+            provider_options.setdefault("guidance_scale", 9.0)
             logger.info("Retoucher job {}: Using synchronous mode for Nano Banana edit with quality settings: num_inference_steps={}, guidance_scale={}", 
                        job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
             
-            # Используем синхронный режим для nano-banana/edit (как в Smart Merge)
+            # Используем синхронный режим для nano-banana/edit
             from app.providers.fal.images import run_image_edit
             try:
                 asset = run_image_edit(
@@ -1762,7 +2113,7 @@ def process_retoucher_job(
                     _send_failure_notification_sync(notify_options, job_id, f"Ошибка ретуши: {exc}")
                 raise
         else:
-            # Для других моделей используем асинхронный queue API
+            # Для всех остальных моделей используем асинхронный queue API
             task_id: str | None = None
             last_error: Exception | None = None
             for attempt in range(1, RETOUCHER_SUBMIT_MAX_ATTEMPTS + 1):
@@ -1801,23 +2152,30 @@ def process_retoucher_job(
                     raise last_error
                 raise RuntimeError(error_text)
 
-            # Polling для получения результата с экспоненциальным backoff
+            # Для всех остальных моделей используем асинхронный polling
+            from app.providers.fal.images import check_status as check_image_status
+            from app.providers.fal.images import resolve_result_asset as resolve_image_asset
+            
+            # Оптимизированный polling для мягкой ретуши - как у Nano Banana (4 секунды)
+            # Используем тот же интервал, что и для создания изображений для консистентности
             poll_attempts = 0
-            max_attempts = 120  # allow up to ~4 minutes for retoucher jobs (with backoff)
-            poll_interval = 2.0  # Start with 2 seconds
-            max_interval = 10.0
-
-            logger.info("Retoucher job {} polling for task {} completion", job_id, task_id)
+            max_attempts = 45  # 3 минуты при интервале 4 сек (45 * 4 = 180 секунд)
+            poll_interval = 4.0  # Фиксированный интервал 4 секунды (как у Nano Banana)
             status: dict[str, Any]
+            
+            logger.info("Retoucher job {} polling for task {} completion (interval: {}s, max_attempts: {})", 
+                       job_id, task_id, poll_interval, max_attempts)
             while True:
-                from app.providers.fal.images import check_image_status
                 status = check_image_status(task_id)
                 current_status = status.get("status")
+                
                 # Логируем статус только каждые 5 попыток или при изменении статуса
                 if poll_attempts % 5 == 0 or current_status not in ("processing", "queued", "IN_QUEUE", "IN_PROGRESS"):
-                    logger.debug("Retoucher job {} task {} status: {} (attempt {})", job_id, task_id, current_status, poll_attempts + 1)
+                    logger.debug("Retoucher job {} task {} status: {} (attempt {})", 
+                               job_id, task_id, current_status, poll_attempts + 1)
 
                 if current_status == "succeeded":
+                    logger.info("Retoucher job {} succeeded after {} attempts", job_id, poll_attempts + 1)
                     break
                 if current_status == "failed":
                     error = status.get("error", "Unknown error")
@@ -1839,16 +2197,12 @@ def process_retoucher_job(
                         _send_failure_notification_sync(notify_options, job_id, error)
                     raise RuntimeError(error)
 
-                # Экспоненциальный backoff: увеличиваем интервал до максимума
+                # Фиксированный интервал 4 секунды (как у Nano Banana)
                 time.sleep(poll_interval)
-                poll_interval = min(poll_interval * 1.1, max_interval)  # Увеличиваем на 10% до максимума
 
             # Получаем результат после завершения
-            from app.providers.fal.images import _extract_image_url as extract_image_url, resolve_image_asset
+            from app.providers.fal.images import _extract_image_url as extract_image_url
             status_image_url = extract_image_url(status)
-            logger.info("Retoucher job {} checking status for result: keys={}, extracted_url={}", 
-                       job_id, list(status.keys()) if isinstance(status, dict) else "not a dict",
-                       status_image_url[:100] if status_image_url else "None")
             asset = None
 
             if status_image_url:
@@ -1878,61 +2232,72 @@ def process_retoucher_job(
                         _send_failure_notification_sync(notify_options, job_id, error)
                     raise RuntimeError(error)
 
-                # Небольшая задержка после завершения, чтобы API успел подготовить результат
+                # Короткая задержка после завершения, чтобы API успел подготовить результат (как в Smart Merge)
                 time.sleep(0.5)
-
-                # Получаем результат с повторными попытками
-                max_result_attempts = 3
-                result_delay = 0.5
-                last_result_error: Exception | None = None
-
-                for result_attempt in range(max_result_attempts):
-                    try:
-                        asset = resolve_image_asset(result_url)
-                        logger.info("Retoucher job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
-                                   job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
-                        break
-                    except httpx.HTTPStatusError as exc:
-                        last_result_error = exc
-                        status_code = exc.response.status_code
-                        if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
-                            logger.warning(
-                                "Retoucher job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
-                                job_id,
-                                result_attempt + 1,
-                                status_code,
-                                exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
-                                result_delay,
-                            )
-                            time.sleep(result_delay)
-                            result_delay *= 1.5
-                            continue
-                        else:
-                            logger.error("Retoucher job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
-                            raise
-                    except Exception as exc:  # noqa: BLE001
-                        last_result_error = exc
-                        logger.error("Retoucher job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
-                        if result_attempt >= max_result_attempts - 1:
-                            raise
-
-                if asset is None:
-                    error = last_result_error or RuntimeError("Failed to get retoucher result")
-                    logger.error("Retoucher job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
+                
+                # Получаем результат одним быстрым вызовом (как в Smart Merge), без повторных попыток
+                try:
+                    asset = resolve_image_asset(result_url)
+                    logger.info("Retoucher job {} successfully got result: asset.url={}, asset.content={}", 
+                               job_id, asset.url[:100] if asset.url else "None", asset.content is not None)
+                except Exception as exc:  # noqa: BLE001
+                    error = f"Не удалось получить результат ретуши: {exc}"
+                    logger.error("Retoucher job {} failed to get result: {}", job_id, exc)
                     if job:
-                        job.meta["error"] = str(error)
+                        job.meta["error"] = str(exc)
                         job.save_meta()
                     if notify_options.get("chat_id"):
-                        _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
-                    raise RuntimeError(str(error))
+                        _send_failure_notification_sync(notify_options, job_id, error)
+                    raise RuntimeError(error)
 
-        # Используем ту же логику сохранения, что и в process_image_edit_job
+        # Проверяем, что asset был успешно получен
+        if asset is None:
+            error = "Не удалось получить результат ретуши"
+            logger.error("Retoucher job {}: asset is None after processing", job_id)
+            if job:
+                job.meta["error"] = error
+                job.save_meta()
+            if notify_options.get("chat_id"):
+                _send_failure_notification_sync(notify_options, job_id, error)
+            raise RuntimeError(error)
+
+        # Для режима "soft" используем асинхронное скачивание (как у Nano Banana create)
+        # Для режима "enhance" используем синхронное скачивание (как было)
+        is_soft_mode = mode == "soft"
+        
         image_url = asset.url
         image_bytes = asset.content
         filename = asset.filename
         saved_path = None
-        if image_bytes is not None:
-            saved_path = _persist_asset(asset, output_file.as_posix())
+        
+        if is_soft_mode:
+            # Асинхронный режим для мягкой ретуши - точно как у Nano Banana Smart Merge
+            # Отправляем по URL сразу, БЕЗ скачивания (как в Smart Merge)
+            if image_bytes is not None:
+                # Изображение уже в памяти - сохраняем синхронно (быстро)
+                saved_path = _persist_asset(asset, output_file.as_posix())
+                logger.info("Retoucher job {} (soft mode): saving from memory ({} bytes) - no download needed", 
+                           job_id, len(image_bytes))
+            elif image_url:
+                # Для всех моделей отправляем по URL сразу (как в Smart Merge)
+                # НЕ скачиваем файл - Telegram скачает сам, это быстрее
+                logger.info("🔄 Retoucher job {} (soft mode): Sending by URL immediately (no download, like Smart Merge)", job_id)
+                saved_path = None
+                # НЕ планируем фоновое скачивание - это замедляет выполнение
+                # Фоновое скачивание занимает время и не нужно для немедленной отправки
+        else:
+            # Синхронный режим для enhance - скачиваем файл перед отправкой
+            if image_bytes is not None:
+                saved_path = _persist_asset(asset, output_file.as_posix())
+            elif image_url:
+                # Если есть только URL, скачиваем синхронно
+                saved_path = _persist_asset(asset, output_file.as_posix())
+                if saved_path and saved_path.exists():
+                    try:
+                        image_bytes = saved_path.read_bytes()
+                        filename = filename or saved_path.name
+                    except Exception as read_exc:  # noqa: BLE001
+                        logger.warning("Failed to read saved retouch result {} (enhance mode): {}", saved_path, read_exc)
 
         if job:
             if image_url:
@@ -1949,11 +2314,17 @@ def process_retoucher_job(
                 job.meta["result_path"] = None
             job.save_meta()
 
-        # Отправляем уведомление об успехе (используем ту же логику, что и в process_image_edit_job)
+        # Отправляем уведомление об успехе (точно как у Nano Banana create)
         if notify_options.get("chat_id"):
             try:
                 reply_markup = None
                 caption_title = "✨ Ретушь готова!"
+                # Проверяем saved_path из job.meta на случай, если фоновое скачивание уже завершилось
+                if saved_path is None and job and job.meta.get("result_path"):
+                    saved_path = Path(job.meta["result_path"])
+                    if not saved_path.exists():
+                        saved_path = None
+                
                 if image_bytes is not None:
                     _send_success_notification_sync(
                         notify_options,
@@ -1963,7 +2334,24 @@ def process_retoucher_job(
                         caption_title=caption_title,
                         reply_markup=reply_markup,
                     )
-                else:
+                elif saved_path and saved_path.exists():
+                    # Используем уже скачанный файл вместо повторного скачивания
+                    logger.info("Using already downloaded file for notification: {} (size: {:.2f} KB)", 
+                               saved_path, saved_path.stat().st_size / 1024)
+                    with open(saved_path, "rb") as f:
+                        image_bytes = f.read()
+                    _send_success_notification_sync(
+                        notify_options,
+                        job_id,
+                        image_bytes=image_bytes,
+                        filename=filename or saved_path.name,
+                        caption_title=caption_title,
+                        reply_markup=reply_markup,
+                    )
+                elif image_url:
+                    # Для всех моделей отправляем по URL напрямую (как в Smart Merge)
+                    # Telegram скачает файл сам - это быстрее, чем скачивать на сервере
+                    logger.info("📤 Sending by URL directly (no download, Telegram will download, like Smart Merge): {}", image_url[:100] if image_url else "None")
                     _send_success_notification_sync(
                         notify_options,
                         job_id,
@@ -1971,8 +2359,10 @@ def process_retoucher_job(
                         caption_title=caption_title,
                         reply_markup=reply_markup,
                     )
+                else:
+                    logger.error("Retoucher job {}: no image_bytes, no saved_path, and no image_url to send", job_id)
             except Exception as notify_error:  # noqa: BLE001
-                logger.error("Failed to send Telegram notification for retoucher job {}: {}", job_id, notify_error)
+                logger.error("Failed to send Telegram notification for retoucher job {}: {}", job_id, notify_error, exc_info=True)
 
         logger.info("Retoucher job {} completed successfully", job_id)
         
@@ -2000,6 +2390,21 @@ def process_retoucher_job(
         }
 
         return caption_path
+    except JobTimeoutException as timeout_exc:
+        # Обработка таймаута задачи - отправляем уведомление пользователю
+        logger.error("Retoucher job {} timed out after 4 minutes", job_id)
+        _handle_job_timeout(job_id, notify_options, "ретуши")
+        # Mark operation as failed
+        if operation_id:
+            db = SessionLocal()
+            try:
+                BillingService.fail_operation(db, operation_id)
+                logger.info("Marked operation {} as failed for retoucher job {} due to timeout", operation_id, job_id)
+            except Exception as fail_error:
+                logger.error("Error failing operation {} for retoucher job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+            finally:
+                db.close()
+        raise
     except Exception as e:
                     # Mark operation as failed on any error
         if operation_id:
@@ -2034,21 +2439,57 @@ def process_smart_merge_job(
     operation_id = _parse_operation_id(operation_id_raw, job_id, "Smart merge")
     provider_prompt = provider_options.pop("provider_prompt", prompt)
     provider_options.setdefault("model", SMART_MERGE_DEFAULT_MODEL)
-    # Если есть width и height, не устанавливаем size по умолчанию
-    # (width и height имеют приоритет в _build_input_payload)
+    
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # # КРИТИЧЕСКИ ВАЖНО: Для Flux 2 Pro Edit проверяем размеры ПЕРЕД установкой дефолтных значений
+    # model_name = provider_options.get("model", "")
+    # is_flux2pro = "flux-2-pro" in model_name.lower() and "/edit" in model_name.lower()
+    # 
+    # # Логируем все параметры для отладки
+    # logger.info("Smart merge job {}: Initial provider_options keys: {}", job_id, list(provider_options.keys()))
+    # logger.info("Smart merge job {}: width={}, height={}, size={}, aspect_ratio={}", 
+    #            job_id, provider_options.get("width"), provider_options.get("height"), 
+    #            provider_options.get("size"), provider_options.get("aspect_ratio"))
+    # 
+    # # Если есть width и height, не устанавливаем size по умолчанию
+    # # (width и height имеют приоритет в _build_input_payload)
+    # if "width" not in provider_options or "height" not in provider_options:
+    #     # Для Flux 2 Pro Edit не устанавливаем дефолтные значения, если размеры не заданы
+    #     # Размеры должны быть переданы из формата
+    #     if not is_flux2pro:
+    #         provider_options.setdefault("size", SMART_MERGE_DEFAULT_SIZE)
+    #         provider_options.setdefault("aspect_ratio", SMART_MERGE_DEFAULT_ASPECT_RATIO)
+    #     else:
+    #         logger.error("Smart merge job {}: Flux 2 Pro Edit detected but width/height not found in provider_options! Available keys: {}", 
+    #                       job_id, list(provider_options.keys()))
+    #         # Устанавливаем дефолтные размеры для Flux 2 Pro, если они не переданы
+    #         provider_options.setdefault("width", 1024)
+    #         provider_options.setdefault("height", 1024)
+    #         logger.warning("Smart merge job {}: Using default 1024x1024 for Flux 2 Pro Edit", job_id)
+    
+    # Для всех моделей устанавливаем дефолтные значения, если нет width и height
     if "width" not in provider_options or "height" not in provider_options:
         provider_options.setdefault("size", SMART_MERGE_DEFAULT_SIZE)
         provider_options.setdefault("aspect_ratio", SMART_MERGE_DEFAULT_ASPECT_RATIO)
 
-    # Проверяем, является ли модель Nano-banana (может принимать русский текст)
+    # Проверяем, является ли модель Nano-banana (могут принимать русский текст)
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
     model_name = provider_options.get("model", "")
+    logger.info("Smart merge job {}: Processing with model='{}', image_sources count={}", job_id, model_name, len(image_sources) if image_sources else 0)
     is_nano_banana_regular = model_name == SMART_MERGE_DEFAULT_MODEL or model_name == "fal-ai/nano-banana" or ("nano-banana" in model_name.lower() and "pro" not in model_name.lower())
     is_nano_banana_pro = "nano-banana-pro" in model_name.lower()
     is_nano_banana = is_nano_banana_regular or is_nano_banana_pro
+    # is_flux2pro = "flux-2-pro" in model_name.lower() and "/edit" in model_name.lower()
+    # 
+    # # Логируем детали для Flux 2 Pro
+    # if is_flux2pro:
+    #     logger.info("Smart merge job {}: Flux 2 Pro Edit detected! image_sources={}", job_id, image_sources)
 
-    if is_nano_banana:
+    if is_nano_banana:  # or is_flux2pro:
         # Для Nano-banana не переводим промпт, используем оригинальный русский
-        logger.info("Smart merge job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
+        # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit
+        model_type = "Nano Banana Pro" if is_nano_banana_pro else "Nano Banana"
+        logger.info("Smart merge job {}: {} model detected, using original Russian prompt without translation", job_id, model_type)
         provider_prompt = prompt  # Используем оригинальный промпт без перевода
     
     # Применяем настройки качества для nano-banana (обычный и pro) и seedream в Smart Merge
@@ -2056,16 +2497,31 @@ def process_smart_merge_job(
     
     if is_nano_banana_regular:
         # Увеличиваем параметры качества для максимального результата (обычный nano-banana)
-        provider_options["num_inference_steps"] = 60
-        provider_options["guidance_scale"] = 9.0
+        provider_options["num_inference_steps"] = 90
+        provider_options["guidance_scale"] = 11.0
         logger.info("Smart merge job {}: Applied quality settings for nano-banana: num_inference_steps={}, guidance_scale={}", 
                    job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
     elif is_nano_banana_pro:
-        # Применяем максимальные настройки качества для nano-banana-pro (максимальная прорисовка)
-        provider_options["num_inference_steps"] = 90
-        provider_options["guidance_scale"] = 10.0
-        logger.info("Smart merge job {}: Applied enhanced quality settings for nano-banana-pro: num_inference_steps={}, guidance_scale={}", 
+        # Не перезаписываем параметры, если они уже установлены (например, из бота с оптимизированными значениями)
+        # Используем значения по умолчанию только если они не были переданы
+        if "num_inference_steps" not in provider_options:
+            provider_options["num_inference_steps"] = 100  # Оптимизированное значение вместо 55
+        if "guidance_scale" not in provider_options:
+            provider_options["guidance_scale"] = 11.0  # Оптимизированное значение вместо 8.5
+        logger.info("Smart merge job {}: Using parameters for nano-banana-pro: num_inference_steps={}, guidance_scale={}", 
                    job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # elif is_flux2pro:
+    #     # Применяем улучшенные настройки качества для Flux 2 Pro Edit
+    #     # Flux 2 Pro поддерживает multi-reference editing (до 6 референсов), поэтому важно правильно передать image_urls
+    #     if "num_inference_steps" not in provider_options:
+    #         provider_options["num_inference_steps"] = 100  # Увеличено до 100 для максимального качества и сходства с референсом
+    #     if "guidance_scale" not in provider_options:
+    #         provider_options["guidance_scale"] = 7.5  # Увеличено до 7.5 для максимального следования промпту и референсам
+    #     # Логируем размеры для проверки
+    #     logger.info("Smart merge job {}: Applied enhanced quality settings for Flux 2 Pro Edit: num_inference_steps={}, guidance_scale={}, image_sources count={}, width={}, height={}, size={}", 
+    #                job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"), 
+    #                len(image_sources) if image_sources else 0, provider_options.get("width"), provider_options.get("height"), provider_options.get("size"))
     elif is_seedream:
         # Применяем максимальные настройки качества для Seedream (увеличенная прорисовка и детализация)
         provider_options["num_inference_steps"] = 120
@@ -2100,19 +2556,27 @@ def process_smart_merge_job(
             provider_prompt,
         )
 
-        # Для nano-banana/edit и nano-banana-pro/edit используем асинхронный режим через queue API
+        # Для nano-banana/edit, nano-banana-pro/edit, flux-2-pro/edit и seedream/edit используем асинхронный режим через queue API
         # чтобы не блокировать worker'ы при высокой нагрузке
         model_name = provider_options.get("model", "")
-        is_nano_banana_edit = "nano-banana" in model_name.lower() and "/edit" in model_name.lower()
+        is_nano_banana_edit = "nano-banana" in model_name.lower() and "/edit" in model_name.lower() and "pro" not in model_name.lower()
         is_nano_banana_pro_edit = "nano-banana-pro" in model_name.lower() and "/edit" in model_name.lower()
+        is_flux2pro_edit = "flux-2-pro" in model_name.lower() and "/edit" in model_name.lower()
+        is_seedream_edit = "seedream" in model_name.lower() and "/edit" in model_name.lower()
         
-        if is_nano_banana_edit:
-            # Используем асинхронный режим для nano-banana/edit и nano-banana-pro/edit
+        if is_nano_banana_edit or is_nano_banana_pro_edit or is_flux2pro_edit or is_seedream_edit:
+            # Используем асинхронный режим для nano-banana/edit, nano-banana-pro/edit и seedream/edit
             from app.providers.fal.images import submit_smart_merge
             from app.providers.fal.images import check_status as check_image_status
             from app.providers.fal.images import resolve_result_asset as resolve_image_asset
+            from app.providers.fal import images as fal_images
+            
             if is_nano_banana_pro_edit:
                 logger.info("Smart merge job {}: Using asynchronous queue mode for nano-banana-pro/edit", job_id)
+            elif is_flux2pro_edit:
+                logger.info("Smart merge job {}: Using asynchronous queue mode for flux-2-pro/edit", job_id)
+            elif is_seedream_edit:
+                logger.info("Smart merge job {}: Using asynchronous queue mode for seedream/edit", job_id)
             else:
                 logger.info("Smart merge job {}: Using asynchronous queue mode for nano-banana/edit", job_id)
             try:
@@ -2122,19 +2586,84 @@ def process_smart_merge_job(
                     **provider_options,
                 )
                 
-                # Polling для получения результата
-                # Используем более частые проверки для быстрого обнаружения завершения
+                # Сначала проверяем, есть ли уже результат в кэше (из ответа queue_submit)
+                cache_entry = fal_images._TASK_CACHE.get(task_id)
+                queue_response = cache_entry.get("queue_response") if cache_entry else None
+                
+                # Пытаемся сразу извлечь URL из ответа, если задача уже завершена
+                result_url = None
+                if queue_response:
+                    # Проверяем, есть ли уже готовый результат в ответе
+                    status_from_response = queue_response.get("status")
+                    if status_from_response == "COMPLETED" or status_from_response == "succeeded":
+                        # Пытаемся извлечь URL из ответа
+                        from app.providers.fal.images import _extract_image_url
+                        result_url = _extract_image_url(queue_response)
+                        if result_url:
+                            logger.info("Smart merge job {}: Got result URL immediately from queue_response", job_id)
+                            # Используем resolve_result_asset для получения финального URL
+                            asset = resolve_image_asset(result_url)
+                            logger.info("Smart merge job {} successfully got result: asset.url={}, asset.content={}", 
+                                       job_id, asset.url[:100] if asset.url else "None", asset.content is not None)
+                            # Пропускаем polling и переходим к сохранению результата
+                            image_url = asset.url
+                            image_bytes = asset.content
+                            filename = asset.filename
+                            saved_path = None
+                            if asset.content is not None:
+                                saved_path = _persist_asset(asset, output_file.as_posix())
+                            
+                            if image_bytes is None and image_url:
+                                logger.info("Smart merge: image not downloaded, will send by URL: {}", image_url[:100])
+                            
+                            if job:
+                                if image_url:
+                                    job.meta["image_url"] = image_url
+                                if image_bytes:
+                                    job.meta["image_inline"] = True
+                                    if filename:
+                                        job.meta["image_filename"] = filename
+                                if saved_path:
+                                    job.meta["result_path"] = saved_path.as_posix()
+                                elif image_url:
+                                    job.meta["result_path"] = None
+                                job.save_meta()
+                            
+                            logger.success("Smart merge job {} completed: {}", job_id, image_url or filename or "binary")
+                            if notify_options.get("chat_id"):
+                                _send_success_notification_sync(notify_options, job_id, image_url, image_bytes, filename)
+                            
+                            if job:
+                                operation_id = notify_options.get("operation_id")
+                                if operation_id:
+                                    from app.services.billing import BillingService
+                                    from app.db.base import SessionLocal
+                                    db = SessionLocal()
+                                    try:
+                                        BillingService.confirm_operation(db, operation_id)
+                                        logger.info("Confirmed operation {} for smart merge job {}", operation_id, job_id)
+                                    finally:
+                                        db.close()
+                            
+                            return
+                
+                # Если результат не получен сразу, начинаем polling
+                logger.info("Smart merge job {}: Result not available immediately, starting polling for task {}", job_id, task_id)
                 poll_attempts = 0
-                max_attempts = 180  # Увеличено для nano-banana-pro/edit (может обрабатываться до 2-3 минут)
-                poll_interval = 1.5  # Уменьшено с 2.0 до 1.5 секунд для более быстрого обнаружения завершения
-                max_interval = 5.0  # Уменьшено с 10.0 до 5.0 секунд, чтобы не пропустить завершение
+                max_attempts = 150  # Уменьшено с 180 до 150 (при 60 шагах генерация быстрее)
+                poll_interval = 2.0  # Уменьшено с 3.0 до 2.0 секунд для более быстрого обнаружения завершения
+                max_interval = 6.0  # Уменьшено с 8.0 до 6.0 секунд
+                consecutive_progress = 0  # Счетчик последовательных проверок со статусом "IN_PROGRESS"
                 
                 logger.info("Smart merge job {} polling for task {} completion", job_id, task_id)
                 while True:
                     status = check_image_status(task_id)
                     current_status = status.get("status")
+                    
+                    # Логируем каждые 10 попыток или при изменении статуса
                     if poll_attempts % 10 == 0 or current_status not in ("processing", "queued", "IN_QUEUE", "IN_PROGRESS"):
-                        logger.debug("Smart merge job {} task {} status: {} (attempt {})", job_id, task_id, current_status, poll_attempts + 1)
+                        logger.debug("Smart merge job {} task {} status: {} (attempt {}, interval: {:.1f}s)", 
+                                   job_id, task_id, current_status, poll_attempts + 1, poll_interval)
                     
                     if current_status == "succeeded":
                         break
@@ -2159,9 +2688,20 @@ def process_smart_merge_job(
                             _send_failure_notification_sync(notify_options, job_id, "Задача превысила время ожидания. Попробуйте позже.")
                         raise RuntimeError(error)
                     
+                    # Адаптивное увеличение интервала: если статус долго "IN_PROGRESS", увеличиваем интервал быстрее
+                    if current_status in ("IN_PROGRESS", "processing"):
+                        consecutive_progress += 1
+                        # После 5 последовательных проверок "IN_PROGRESS" начинаем увеличивать интервал быстрее
+                        if consecutive_progress > 5:
+                            poll_interval = min(poll_interval * 1.15, max_interval)
+                        else:
+                            poll_interval = min(poll_interval * 1.08, max_interval)
+                    else:
+                        consecutive_progress = 0
+                        # Если статус изменился (например, "IN_QUEUE"), увеличиваем интервал медленнее
+                        poll_interval = min(poll_interval * 1.05, max_interval)
+                    
                     time.sleep(poll_interval)
-                    # Увеличиваем интервал медленнее, чтобы не пропустить завершение
-                    poll_interval = min(poll_interval * 1.05, max_interval)  # Уменьшено с 1.1 до 1.05 для более плавного увеличения
                 
                 # Получаем результат
                 result_url = status.get("result_url") or status.get("response_url")
@@ -2283,6 +2823,21 @@ def process_smart_merge_job(
                 db.close()
 
         return image_url or ""
+    except JobTimeoutException as timeout_exc:
+        # Обработка таймаута задачи - отправляем уведомление пользователю
+        logger.error("Smart merge job {} timed out after 4 minutes", job_id)
+        _handle_job_timeout(job_id, notify_options, "объединения изображений")
+        # Mark operation as failed
+        if operation_id:
+            db = SessionLocal()
+            try:
+                BillingService.fail_operation(db, operation_id)
+                logger.info("Marked operation {} as failed for smart merge job {} due to timeout", operation_id, job_id)
+            except Exception as fail_error:
+                logger.error("Error failing operation {} for smart merge job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+            finally:
+                db.close()
+        raise
     except Exception as e:
         # Mark operation as failed on any error
         if operation_id:
@@ -2326,247 +2881,532 @@ def process_image_upscale_job(
 
     job = get_current_job()
     
-    if job:
-        job.meta.update(
-            {
-                "upscale": True,
-                "source_url": image_url,
-                "scale": scale_value,
-                "model": model_name,
-            }
-        )
-        job.save_meta()
-
-    cleanup_paths: list[Path] = []
-    local_input_path: Path | None = None
-    input_dimensions = None
-    if image_path:
-        candidate = Path(image_path)
-        if candidate.exists():
-            local_input_path = candidate
-        else:
-            logger.warning("Provided image_path {} does not exist for upscale job {}", image_path, job_id)
-
-    if local_input_path is None and image_url:
-        fd, tmp_name = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
-        tmp_path = Path(tmp_name)
-        try:
-            download_file(image_url, tmp_path.as_posix())
-            cleanup_paths.append(tmp_path)
-            local_input_path = tmp_path
-        except Exception as download_exc:  # noqa: BLE001
-            logger.error("Failed to download source image for upscale job {}: {}", job_id, download_exc)
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-            raise
-
-    if local_input_path:
-        try:
-            with Image.open(local_input_path) as input_image:
-                prepared = input_image.convert("RGB")
-                max_edge = max(prepared.size)
-                original_input_size = f"{prepared.width}x{prepared.height}"
-                # Don't reduce input size - let the model handle it
-                # The model should accept images up to reasonable size
-                # Only log if we would have reduced it
-                if max_edge > UPSCALE_INPUT_MAX_EDGE:
-                    logger.info(
-                        "Upscale job {}: input image {}x{} exceeds {}px limit, but sending as-is (model should handle it)",
-                        job_id,
-                        prepared.width,
-                        prepared.height,
-                        UPSCALE_INPUT_MAX_EDGE,
-                    )
-                else:
-                    # Calculate input file size
-                    input_file_size = local_input_path.stat().st_size / (1024 * 1024)
-                    logger.info(
-                        "Upscale job {}: input image size {}x{} (file size: {:.2f}MB, format: PNG)",
-                        job_id,
-                        prepared.width,
-                        prepared.height,
-                        input_file_size,
-                    )
-                fd, png_name = tempfile.mkstemp(suffix=".png")
-                os.close(fd)
-                png_path = Path(png_name)
-                prepared.save(png_path.as_posix(), "PNG", optimize=True)
-                cleanup_paths.append(png_path)
-                local_input_path = png_path
-                input_dimensions = original_input_size
-        except Exception as prepare_exc:  # noqa: BLE001
-            logger.warning("Failed to preprocess upscale input for job {}: {}", job_id, prepare_exc)
-
-    # Log input image dimensions
-    if input_dimensions is None and local_input_path and local_input_path.exists():
-        try:
-            with Image.open(local_input_path) as img:
-                input_dimensions = f"{img.width}x{img.height}"
-        except Exception:
-            pass
-
-    logger.info(
-        "Processing image upscale job {} for url={}, path={} (scale={}, input_size={})",
-        job_id,
-        image_url,
-        image_path,
-        scale_value,
-        input_dimensions or "unknown",
-    )
-
-    if local_input_path is None:
-        error = "Не удалось подготовить изображение для апскейла."
-        logger.error("Upscale job {} missing source image (url={}, path={})", job_id, image_url, image_path)
+    try:
         if job:
-            job.meta["error"] = error
-            job.save_meta()
-        if notify_options.get("chat_id"):
-            _send_failure_notification_sync(notify_options, job_id, error)
-        raise RuntimeError(error)
-
-    # Use queue API for more reliable processing (async approach like face swap)
-    attempts = 0
-    delay = UPSCALE_RETRY_BASE_DELAY
-    last_error: Exception | None = None
-    task_id: str | None = None
-    used_model = model_name
-
-    # Add parameters to control output format - request JPEG format with quality for file size control
-    upscale_options = dict(provider_options)
-    # Try to request JPEG format for all upscale models to reduce file size
-    # Note: Some models may not support output_format parameter, but we try anyway
-    if model_name in ("fal-ai/recraft/upscale/crisp", "fal-ai/recraft/upscale/creative", "fal-ai/esrgan"):
-        # Request JPEG format with quality parameter to control file size (3-5 MB target)
-        upscale_options.setdefault("output_format", "jpeg")
-        upscale_options.setdefault("quality", 50)  # Lower quality (40-50%) to reduce file size
-        logger.info("Upscale job {}: requesting JPEG output format with quality={} for model {}", 
-                   job_id, upscale_options.get("quality"), model_name)
-
-    # Try primary model first
-    while attempts < UPSCALE_MAX_ATTEMPTS:
-        try:
-            logger.info("Upscale job {}: calling submit_image_upscale with upscale_options: {}", 
-                       job_id, {k: v for k, v in upscale_options.items() if not k.startswith("notify_") and not k.startswith("source_")})
-            task_id = submit_image_upscale(
-                image_url=None,
-                image_path=local_input_path.as_posix() if local_input_path else None,
-                scale=scale_value,
-                model=model_name,
-                **upscale_options,
+            job.meta.update(
+                {
+                    "upscale": True,
+                    "source_url": image_url,
+                    "scale": scale_value,
+                    "model": model_name,
+                }
             )
-            logger.info("Upscale job {} submitted to queue with task_id: {} (model: {})", job_id, task_id, model_name)
-            break
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            attempts += 1
-            logger.info("Upscale job {} submit attempt {} caught exception: {} ({})", 
-                       job_id, attempts, type(exc).__name__, exc)
-            is_retryable = _is_retryable_error(exc)
-            logger.info("Upscale job {} submit attempt {}: is_retryable={}, attempts_left={}", 
-                       job_id, attempts, is_retryable, UPSCALE_MAX_ATTEMPTS - attempts)
-            if is_retryable and attempts < UPSCALE_MAX_ATTEMPTS:
-                error_type = "network/server" if isinstance(exc, (httpx.RequestError, httpx.HTTPStatusError)) else "error"
-                logger.warning(
-                    "Upscale job {} submit attempt {} failed due to {} issue: {}. Retrying in {:.1f}s",
-                    job_id,
-                    attempts,
-                    error_type,
-                    exc,
-                    delay,
-                )
-                time.sleep(delay)
-                delay *= 2
-                continue
-            logger.error("Upscale job {} submit failed after {} attempts: {}", job_id, attempts, exc)
+            job.save_meta()
+    except Exception:
+        pass  # Ignore errors in job meta update
 
-            # Determine error message based on error type
-            if isinstance(exc, httpx.HTTPStatusError):
-                status_code = exc.response.status_code
-                if status_code == 500:
-                    error_msg = (
-                        "Сервер временно недоступен (ошибка 500). "
-                        "Это проблема на стороне сервиса fal.ai. "
-                        "Попробуйте повторить запрос через несколько минут."
-                    )
-                elif status_code == 422:
-                    error_msg = (
-                        "Некорректные параметры запроса (ошибка 422). "
-                        "Проверьте, что загружено корректное изображение."
-                    )
-                elif status_code == 429:
-                    error_msg = (
-                        "Превышен лимит запросов (ошибка 429). "
-                        "Подождите немного и попробуйте снова."
-                    )
-                else:
-                    error_msg = f"Ошибка API (код {status_code}). Попробуйте позже."
-            elif isinstance(exc, httpx.RequestError):
-                error_msg = (
-                    "Проблема с сетью при обращении к API. "
-                    "Проверьте подключение к интернету и попробуйте снова."
-                )
+    try:
+        cleanup_paths: list[Path] = []
+        local_input_path: Path | None = None
+        input_dimensions = None
+        if image_path:
+            candidate = Path(image_path)
+            if candidate.exists():
+                local_input_path = candidate
             else:
-                    error_msg = f"Не удалось отправить запрос на улучшение изображения: {str(exc)}. Попробуйте позже."
+                logger.warning("Provided image_path {} does not exist for upscale job {}", image_path, job_id)
 
-            if job:
-                job.meta["error"] = str(exc)
-                job.meta["error_message"] = error_msg
-                job.save_meta()
-            if notify_options.get("chat_id"):
-                _send_failure_notification_sync(
-                    notify_options,
-                    job_id,
-                    error_msg,
-                )
+        if local_input_path is None and image_url:
+            fd, tmp_name = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            try:
+                _download_file_with_retry(image_url, tmp_path.as_posix())
+                cleanup_paths.append(tmp_path)
+                local_input_path = tmp_path
+            except Exception as download_exc:  # noqa: BLE001
+                logger.error("Failed to download source image for upscale job {}: {}", job_id, download_exc)
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
                 raise
 
-    if task_id is None:
-        error = last_error or RuntimeError("Upscale task submission failed")
-        if job:
-            job.meta["error"] = str(error)
-            job.save_meta()
-        if notify_options.get("chat_id"):
-            _send_failure_notification_sync(notify_options, job_id, str(error))
-        raise RuntimeError(str(error))
+        if local_input_path:
+            try:
+                with Image.open(local_input_path) as input_image:
+                    prepared = input_image.convert("RGB")
+                    max_edge = max(prepared.size)
+                    original_input_size = f"{prepared.width}x{prepared.height}"
+                    # Don't reduce input size - let the model handle it
+                    # The model should accept images up to reasonable size
+                    # Only log if we would have reduced it
+                    if max_edge > UPSCALE_INPUT_MAX_EDGE:
+                        logger.info(
+                            "Upscale job {}: input image {}x{} exceeds {}px limit, but sending as-is (model should handle it)",
+                            job_id,
+                            prepared.width,
+                            prepared.height,
+                            UPSCALE_INPUT_MAX_EDGE,
+                        )
+                    else:
+                        # Calculate input file size
+                        input_file_size = local_input_path.stat().st_size / (1024 * 1024)
+                        logger.info(
+                            "Upscale job {}: input image size {}x{} (file size: {:.2f}MB, format: PNG)",
+                            job_id,
+                            prepared.width,
+                            prepared.height,
+                            input_file_size,
+                        )
+                    fd, png_name = tempfile.mkstemp(suffix=".png")
+                    os.close(fd)
+                    png_path = Path(png_name)
+                    prepared.save(png_path.as_posix(), "PNG", optimize=True)
+                    cleanup_paths.append(png_path)
+                    local_input_path = png_path
+                    input_dimensions = original_input_size
+            except Exception as prepare_exc:  # noqa: BLE001
+                logger.warning("Failed to preprocess upscale input for job {}: {}", job_id, prepare_exc)
 
-    # Cleanup temporary input files before polling (they're no longer needed)
-    for tmp in cleanup_paths:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Failed to remove temporary file {} after upscale job {}", tmp, job_id)
+        # Log input image dimensions
+        if input_dimensions is None and local_input_path and local_input_path.exists():
+            try:
+                with Image.open(local_input_path) as img:
+                    input_dimensions = f"{img.width}x{img.height}"
+            except Exception:
+                pass
 
-    # Poll for completion using queue API
-    logger.info("Upscale job {} polling for task {} completion", job_id, task_id)
-    status = check_image_status(task_id)
-    poll_attempts = 0
+        logger.info(
+            "Processing image upscale job {} for url={}, path={} (scale={}, input_size={})",
+            job_id,
+            image_url,
+            image_path,
+            scale_value,
+            input_dimensions or "unknown",
+        )
 
-    while status["status"] not in ("succeeded", "failed"):
-        if poll_attempts >= UPSCALE_POLL_MAX_ATTEMPTS:
-            error = "Upscale task timed out after polling"
-            logger.error("Upscale job {} task {} timed out", job_id, task_id)
+        if local_input_path is None:
+            error = "Не удалось подготовить изображение для апскейла."
+            logger.error("Upscale job {} missing source image (url={}, path={})", job_id, image_url, image_path)
             if job:
                 job.meta["error"] = error
                 job.save_meta()
             if notify_options.get("chat_id"):
-                _send_failure_notification_sync(notify_options, job_id, "Задача превысила время ожидания. Попробуйте позже.")
+                _send_failure_notification_sync(notify_options, job_id, error)
             raise RuntimeError(error)
 
-        poll_attempts += 1
-        time.sleep(5)  # Poll every 5 seconds
-        status = check_image_status(task_id)
-        logger.debug("Upscale job {} task {} status: {}", job_id, task_id, status["status"])
+        # Use queue API for more reliable processing (async approach like face swap)
+        attempts = 0
+        delay = UPSCALE_RETRY_BASE_DELAY
+        last_error: Exception | None = None
+        task_id: str | None = None
+        used_model = model_name
 
-    if status["status"] == "failed":
-        error = status.get("error", "Unknown error")
-        logger.error("Upscale job {} task {} failed: {}", job_id, task_id, error)
+        # Add parameters to control output format - request JPEG format with quality for file size control
+        upscale_options = dict(provider_options)
+        # Request PNG format for all upscale models
+        # Note: Some models may not support output_format parameter, but we try anyway
+        if model_name in ("fal-ai/recraft/upscale/crisp", "fal-ai/recraft/upscale/creative", "fal-ai/esrgan"):
+            # Request PNG format
+            upscale_options.setdefault("output_format", "png")
+            logger.info("Upscale job {}: requesting PNG output format for model {}", 
+                       job_id, model_name)
+
+        # Try primary model first
+        while attempts < UPSCALE_MAX_ATTEMPTS:
+            try:
+                logger.info("Upscale job {}: calling submit_image_upscale with upscale_options: {}", 
+                           job_id, {k: v for k, v in upscale_options.items() if not k.startswith("notify_") and not k.startswith("source_")})
+                task_id = submit_image_upscale(
+                    image_url=None,
+                    image_path=local_input_path.as_posix() if local_input_path else None,
+                    scale=scale_value,
+                    model=model_name,
+                    **upscale_options,
+                )
+                logger.info("Upscale job {} submitted to queue with task_id: {} (model: {})", job_id, task_id, model_name)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                attempts += 1
+                logger.info("Upscale job {} submit attempt {} caught exception: {} ({})", 
+                           job_id, attempts, type(exc).__name__, exc)
+                is_retryable = _is_retryable_error(exc)
+                logger.info("Upscale job {} submit attempt {}: is_retryable={}, attempts_left={}", 
+                           job_id, attempts, is_retryable, UPSCALE_MAX_ATTEMPTS - attempts)
+                if is_retryable and attempts < UPSCALE_MAX_ATTEMPTS:
+                    error_type = "network/server" if isinstance(exc, (httpx.RequestError, httpx.HTTPStatusError)) else "error"
+                    logger.warning(
+                        "Upscale job {} submit attempt {} failed due to {} issue: {}. Retrying in {:.1f}s",
+                        job_id,
+                        attempts,
+                        error_type,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                logger.error("Upscale job {} submit failed after {} attempts: {}", job_id, attempts, exc)
+
+                # Determine error message based on error type
+                if isinstance(exc, httpx.HTTPStatusError):
+                    status_code = exc.response.status_code
+                    if status_code == 500:
+                        error_msg = (
+                            "Сервер временно недоступен (ошибка 500). "
+                            "Это проблема на стороне сервиса fal.ai. "
+                            "Попробуйте повторить запрос через несколько минут."
+                        )
+                    elif status_code == 422:
+                        error_msg = (
+                            "Некорректные параметры запроса (ошибка 422). "
+                            "Проверьте, что загружено корректное изображение."
+                        )
+                    elif status_code == 429:
+                        error_msg = (
+                            "Превышен лимит запросов (ошибка 429). "
+                            "Подождите немного и попробуйте снова."
+                        )
+                    else:
+                        error_msg = f"Ошибка API (код {status_code}). Попробуйте позже."
+                elif isinstance(exc, httpx.RequestError):
+                    error_msg = (
+                        "Проблема с сетью при обращении к API. "
+                        "Проверьте подключение к интернету и попробуйте снова."
+                    )
+                else:
+                    error_msg = f"Не удалось отправить запрос на улучшение изображения: {str(exc)}. Попробуйте позже."
+
+                if job:
+                    job.meta["error"] = str(exc)
+                    job.meta["error_message"] = error_msg
+                    job.save_meta()
+                if notify_options.get("chat_id"):
+                    _send_failure_notification_sync(
+                        notify_options,
+                        job_id,
+                        error_msg,
+                    )
+                raise
+
+        if task_id is None:
+            error = last_error or RuntimeError("Upscale task submission failed")
+            if job:
+                job.meta["error"] = str(error)
+                job.save_meta()
+            if notify_options.get("chat_id"):
+                _send_failure_notification_sync(notify_options, job_id, str(error))
+            raise RuntimeError(str(error))
+
+        # Cleanup temporary input files before polling (they're no longer needed)
+        for tmp in cleanup_paths:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("Failed to remove temporary file {} after upscale job {}", tmp, job_id)
+
+        # Poll for completion using queue API
+        logger.info("Upscale job {} polling for task {} completion", job_id, task_id)
+        status = check_image_status(task_id)
+        poll_attempts = 0
+
+        while status["status"] not in ("succeeded", "failed"):
+            if poll_attempts >= UPSCALE_POLL_MAX_ATTEMPTS:
+                error = "Upscale task timed out after polling"
+                logger.error("Upscale job {} task {} timed out", job_id, task_id)
+                if job:
+                    job.meta["error"] = error
+                    job.save_meta()
+                if notify_options.get("chat_id"):
+                    _send_failure_notification_sync(notify_options, job_id, "Задача превысила время ожидания. Попробуйте позже.")
+                raise RuntimeError(error)
+
+            poll_attempts += 1
+            time.sleep(5)  # Poll every 5 seconds
+            status = check_image_status(task_id)
+            logger.debug("Upscale job {} task {} status: {}", job_id, task_id, status["status"])
+
+            if status["status"] == "failed":
+                error = status.get("error", "Unknown error")
+                logger.error("Upscale job {} task {} failed: {}", job_id, task_id, error)
+                if job:
+                    job.meta["error"] = error
+                    job.save_meta()
+                if notify_options.get("chat_id"):
+                    _send_failure_notification_sync(notify_options, job_id, f"Улучшение изображения не удалось: {error}")
+                # Mark operation as failed on error
+                if operation_id:
+                    db = SessionLocal()
+                    try:
+                        BillingService.fail_operation(db, operation_id)
+                        logger.info("Marked operation {} as failed for upscale job {} due to error", operation_id, job_id)
+                    except Exception as fail_error:
+                        logger.error("Error failing operation {} for upscale job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+                    finally:
+                        db.close()
+                raise RuntimeError(error)
+
+        # After the while loop, status is either "succeeded" or "failed"
+        # According to fal.ai docs, when status is COMPLETED, the result may be in the status response itself
+        # or available via response_url. Let's check if result is already in status first.
+        from app.providers.fal.images import _extract_image_url as extract_image_url
+        status_image_url = extract_image_url(status)
+        logger.debug("Upscale job {} extracted URL from status: {}", job_id, status_image_url[:100] if status_image_url else "None")
+        asset = None
+
+        if status_image_url:
+            # Check if this is a queue API endpoint (response_url) or a real image URL
+            if status_image_url.startswith("https://queue.fal.run") or status_image_url.startswith("http://queue.fal.run"):
+                # This is a queue API endpoint, not a direct image URL - skip it
+                logger.info("Upscale job {} found response_url in status (not a direct image URL), will use resolve_image_asset", job_id)
+                status_image_url = None
+                asset = None  # Ensure asset is None so we use resolve_image_asset
+            elif status_image_url.startswith("data:"):
+                logger.info("Upscale job {} result found in status response (data URL)", job_id)
+                # Result is already in status as data URL, extract it directly
+                from app.providers.fal.images import ImageAsset
+                import base64
+                header, _, data_part = status_image_url.partition(",")
+                content = base64.b64decode(data_part)
+                asset = ImageAsset(url=None, content=content, filename="upscale.png")
+            elif status_image_url.startswith("http"):
+                # This looks like a direct image URL (CDN, etc.)
+                logger.info("Upscale job {} result found in status response (direct URL): {}", job_id, status_image_url[:100])
+                from app.providers.fal.images import ImageAsset
+                asset = ImageAsset(url=status_image_url, content=None, filename=None)
+            else:
+                logger.warning("Upscale job {} unexpected image URL format in status: {}", job_id, status_image_url[:100])
+
+        # If result not in status, try to get it via response_url with retries
+        if asset is None:
+            result_url = status.get("result_url")
+            if not result_url:
+                error = "Upscale task completed but no result URL provided and no result in status"
+                logger.error("Upscale job {} task {} completed without result URL or result in status", job_id, task_id)
+                if job:
+                    job.meta["error"] = error
+                    job.save_meta()
+                if notify_options.get("chat_id"):
+                    _send_failure_notification_sync(notify_options, job_id, "Задача завершена, но результат недоступен.")
+                raise RuntimeError(error)
+
+            # Small delay after completion to allow API to prepare the result
+            # Sometimes the API returns 500 immediately after COMPLETED status
+            logger.debug("Upscale job {} task {} completed, waiting 1s before fetching result", job_id, task_id)
+            time.sleep(1.0)
+
+            # Try to get result with retries and increasing delays
+            # Use resolve_image_asset which properly handles authorization and retries
+            max_result_attempts = 5
+            result_delay = 1.0
+            last_result_error: Exception | None = None
+            api_file_size: int | None = None  # Store file_size from API response
+
+            for result_attempt in range(max_result_attempts):
+                try:
+                    logger.debug("Upscale job {} attempt {} to get result from {}", job_id, result_attempt + 1, result_url)
+
+                    # Try to extract file_size from API response before calling resolve_image_asset
+                    from app.providers.fal.images import _parse_result_url
+                    from app.providers.fal.client import queue_result
+                    parsed = _parse_result_url(result_url)
+                    if parsed:
+                        model_path, request_id = parsed
+                        try:
+                            response_data = queue_result(model_path, request_id)
+                            if isinstance(response_data, dict):
+                                # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
+                                if 'image' in response_data and isinstance(response_data['image'], dict):
+                                    extracted_size = response_data['image'].get('file_size')
+                                    if extracted_size:
+                                        api_file_size = extracted_size
+                                        logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
+                                                   job_id, api_file_size, api_file_size / (1024 * 1024))
+                                elif 'file_size' in response_data:
+                                    extracted_size = response_data.get('file_size')
+                                    if extracted_size:
+                                        api_file_size = extracted_size
+                                        logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
+                                                   job_id, api_file_size, api_file_size / (1024 * 1024))
+                        except Exception as size_extract_exc:  # noqa: BLE001
+                            logger.debug("Upscale job {}: could not extract file_size from API response: {}", job_id, size_extract_exc)
+
+                    # Use resolve_image_asset which properly handles queue API authorization
+                    asset = resolve_image_asset(result_url)
+                    logger.info("Upscale job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
+                               job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
+                    # Check if asset.url is a queue API endpoint - if so, we need to get the actual image URL
+                    if asset.url and (asset.url.startswith("https://queue.fal.run") or asset.url.startswith("http://queue.fal.run")):
+                        logger.warning("Upscale job {} asset.url is a queue API endpoint, this should not happen. asset.url={}", 
+                                      job_id, asset.url)
+                        # Try to get the actual result from queue_result
+                        from app.providers.fal.client import queue_result
+                        from app.providers.fal.images import _extract_image_url, ImageAsset, _parse_result_url
+                        parsed = _parse_result_url(result_url)
+                        if parsed:
+                            model_path, request_id = parsed
+                            logger.info("Upscale job {} trying queue_result directly for model={}, request_id={}", 
+                                       job_id, model_path, request_id)
+                            response_data = queue_result(model_path, request_id)
+                            logger.info("Upscale job {} queue_result response keys: {}", job_id, list(response_data.keys()) if isinstance(response_data, dict) else "not a dict")
+                            actual_image_url = _extract_image_url(response_data)
+                            # Try to extract file_size from response_data
+                            if isinstance(response_data, dict):
+                                # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
+                                if 'image' in response_data and isinstance(response_data['image'], dict):
+                                    api_file_size = response_data['image'].get('file_size')
+                                elif 'file_size' in response_data:
+                                    api_file_size = response_data['file_size']
+                                if api_file_size:
+                                    logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
+                                               job_id, api_file_size, api_file_size / (1024 * 1024))
+                            if actual_image_url and not (actual_image_url.startswith("https://queue.fal.run") or actual_image_url.startswith("http://queue.fal.run")):
+                                logger.info("Upscale job {} extracted actual image URL: {}", job_id, actual_image_url[:100])
+                                asset = ImageAsset(url=actual_image_url, content=None, filename=None)
+                            else:
+                                logger.error("Upscale job {} failed to extract valid image URL from queue_result response", job_id)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_result_error = exc
+                    # Check if it's an HTTP error that we can retry
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        status_code = exc.response.status_code
+                        if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
+                            logger.warning(
+                                "Upscale job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
+                                job_id,
+                                result_attempt + 1,
+                                status_code,
+                                exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
+                                result_delay,
+                            )
+                            time.sleep(result_delay)
+                            result_delay *= 1.5
+                            continue
+                        else:
+                            logger.error("Upscale job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
+                            raise
+                    else:
+                        logger.error("Upscale job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
+                        if result_attempt >= max_result_attempts - 1:
+                            raise
+
+        if asset is None:
+            error_msg = str(last_result_error) if last_result_error else "Failed to get upscale result"
+            logger.error("Upscale job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error_msg)
+            if job:
+                job.meta["error"] = error_msg
+                job.save_meta()
+            if notify_options.get("chat_id"):
+                _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error_msg}")
+            # Mark operation as failed
+            if operation_id:
+                db = SessionLocal()
+                try:
+                    BillingService.fail_operation(db, operation_id)
+                    logger.info("Marked operation {} as failed for upscale job {} due to error", operation_id, job_id)
+                except Exception as fail_error:
+                    logger.error("Error failing operation {} for upscale job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+                finally:
+                    db.close()
+            raise RuntimeError(error_msg)
+
+        if asset is None:
+            raise RuntimeError("fal upscale did not return an asset")
+
+        # Use same approach as Smart merge - send by URL directly
+        # This avoids download timeouts and Telegram handles the download server-side
+        # send_document with URL doesn't compress files, so quality is preserved
+        saved_path = _persist_asset(asset, output_file.as_posix(), skip_download=True)
+        logger.info("Upscale: _persist_asset returned saved_path={}, asset.url={}, asset.content={}", 
+                saved_path, asset.url, asset.content is not None)
+
+        # Schedule background download for caching, but don't block sending
+        if asset.url:
+            _schedule_result_download(job_id, asset.url, output_file)
+            logger.debug("Scheduled background download for upscale result: {} -> {}", asset.url, output_file)
+
+        caption_url = asset.url
+        image_bytes = asset.content
+        filename = asset.filename
+
+        # If no image_bytes but saved_path exists, read file (for fallback)
+        if image_bytes is None and saved_path and saved_path.exists():
+            try:
+                image_bytes = saved_path.read_bytes()
+                filename = filename or saved_path.name
+                logger.debug("Read upscale result from file: {} ({} bytes)", saved_path, len(image_bytes))
+            except Exception as read_exc:  # noqa: BLE001
+                logger.warning("Failed to read saved upscale result {}: {}", saved_path, read_exc)
+
         if job:
-            job.meta["error"] = error
+            if asset.url:
+                job.meta["image_url"] = asset.url
+            if asset.content:
+                job.meta["image_inline"] = True
+                if asset.filename:
+                    job.meta["image_filename"] = asset.filename
+                if saved_path:
+                    job.meta["result_path"] = saved_path.as_posix()
+                else:
+                    job.meta["result_path"] = None
             job.save_meta()
+
         if notify_options.get("chat_id"):
-                _send_failure_notification_sync(notify_options, job_id, f"Улучшение изображения не удалось: {error}")
-        # Mark operation as failed on error
+            try:
+                logger.info(
+                    "Sending upscale notification: job_id={}, has_bytes={}, has_url={}, filename={}",
+                    job_id,
+                    image_bytes is not None,
+                    bool(caption_url),
+                    filename,
+                )
+                if image_bytes is not None:
+                    _send_success_notification_sync(
+                        notify_options,
+                        job_id,
+                        image_bytes=image_bytes,
+                        filename=filename,
+                        caption_title="🔍 Улучшение изображения готово!",
+                        reply_markup=None,
+                    )
+                    logger.info("Upscale notification sent successfully with image bytes")
+                elif caption_url:
+                    _send_success_notification_sync(
+                        notify_options,
+                        job_id,
+                        image_url=caption_url,
+                        caption_title="🔍 Улучшение изображения готово!",
+                        reply_markup=None,
+                    )
+                    logger.info("Upscale notification sent successfully with image URL")
+                else:
+                    logger.error("Upscale job {}: no image_bytes and no image_url to send", job_id)
+            except Exception as notify_error:  # noqa: BLE001
+                logger.error("Failed to send Telegram notification for upscale job {}: {}", job_id, notify_error, exc_info=True)
+
+        # Confirm operation after successful completion
+        if operation_id:
+            db = SessionLocal()
+            try:
+                success = BillingService.confirm_operation(db, operation_id)
+                if success:
+                    logger.info("Confirmed operation {} for upscale job {}", operation_id, job_id)
+                else:
+                    logger.error("Failed to confirm operation {} for upscale job {}", operation_id, job_id)
+            except Exception as e:
+                logger.error("Error confirming operation {} for upscale job {}: {}", operation_id, job_id, e, exc_info=True)
+            finally:
+                db.close()
+
+        return caption_url or ""
+    except JobTimeoutException as timeout_exc:
+        # Обработка таймаута задачи - отправляем уведомление пользователю
+        logger.error("Upscale job {} timed out after 4 minutes", job_id)
+        _handle_job_timeout(job_id, notify_options, "улучшения качества")
+        # Mark operation as failed
+        if operation_id:
+            db = SessionLocal()
+            try:
+                BillingService.fail_operation(db, operation_id)
+                logger.info("Marked operation {} as failed for upscale job {} due to timeout", operation_id, job_id)
+            except Exception as fail_error:
+                logger.error("Error failing operation {} for upscale job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+            finally:
+                db.close()
+        raise
+    except Exception as e:
+        # Mark operation as failed on any error
         if operation_id:
             db = SessionLocal()
             try:
@@ -2576,248 +3416,4 @@ def process_image_upscale_job(
                 logger.error("Error failing operation {} for upscale job {}: {}", operation_id, job_id, fail_error, exc_info=True)
             finally:
                 db.close()
-        raise RuntimeError(error)
-
-    # According to fal.ai docs, when status is COMPLETED, the result may be in the status response itself
-    # or available via response_url. Let's check if result is already in status first.
-    from app.providers.fal.images import _extract_image_url as extract_image_url
-    status_image_url = extract_image_url(status)
-    logger.debug("Upscale job {} extracted URL from status: {}", job_id, status_image_url[:100] if status_image_url else "None")
-    asset = None
-
-    if status_image_url:
-        # Check if this is a queue API endpoint (response_url) or a real image URL
-        if status_image_url.startswith("https://queue.fal.run") or status_image_url.startswith("http://queue.fal.run"):
-            # This is a queue API endpoint, not a direct image URL - skip it
-            logger.info("Upscale job {} found response_url in status (not a direct image URL), will use resolve_image_asset", job_id)
-            status_image_url = None
-            asset = None  # Ensure asset is None so we use resolve_image_asset
-        elif status_image_url.startswith("data:"):
-            logger.info("Upscale job {} result found in status response (data URL)", job_id)
-            # Result is already in status as data URL, extract it directly
-            from app.providers.fal.images import ImageAsset
-            import base64
-            header, _, data_part = status_image_url.partition(",")
-            content = base64.b64decode(data_part)
-            asset = ImageAsset(url=None, content=content, filename="upscale.png")
-        elif status_image_url.startswith("http"):
-            # This looks like a direct image URL (CDN, etc.)
-            logger.info("Upscale job {} result found in status response (direct URL): {}", job_id, status_image_url[:100])
-            from app.providers.fal.images import ImageAsset
-            asset = ImageAsset(url=status_image_url, content=None, filename=None)
-        else:
-            logger.warning("Upscale job {} unexpected image URL format in status: {}", job_id, status_image_url[:100])
-
-    # If result not in status, try to get it via response_url with retries
-    if asset is None:
-        result_url = status.get("result_url")
-        if not result_url:
-            error = "Upscale task completed but no result URL provided and no result in status"
-            logger.error("Upscale job {} task {} completed without result URL or result in status", job_id, task_id)
-            if job:
-                job.meta["error"] = error
-                job.save_meta()
-            if notify_options.get("chat_id"):
-                _send_failure_notification_sync(notify_options, job_id, "Задача завершена, но результат недоступен.")
-            raise RuntimeError(error)
-
-        # Small delay after completion to allow API to prepare the result
-        # Sometimes the API returns 500 immediately after COMPLETED status
-        logger.debug("Upscale job {} task {} completed, waiting 1s before fetching result", job_id, task_id)
-        time.sleep(1.0)
-
-        # Try to get result with retries and increasing delays
-        # Use resolve_image_asset which properly handles authorization and retries
-        max_result_attempts = 5
-        result_delay = 1.0
-        last_result_error: Exception | None = None
-        api_file_size: int | None = None  # Store file_size from API response
-
-        for result_attempt in range(max_result_attempts):
-            try:
-                logger.debug("Upscale job {} attempt {} to get result from {}", job_id, result_attempt + 1, result_url)
-
-                # Try to extract file_size from API response before calling resolve_image_asset
-                from app.providers.fal.images import _parse_result_url
-                from app.providers.fal.client import queue_result
-                parsed = _parse_result_url(result_url)
-                if parsed:
-                    model_path, request_id = parsed
-                    try:
-                        response_data = queue_result(model_path, request_id)
-                        if isinstance(response_data, dict):
-                            # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
-                            if 'image' in response_data and isinstance(response_data['image'], dict):
-                                extracted_size = response_data['image'].get('file_size')
-                                if extracted_size:
-                                    api_file_size = extracted_size
-                                    logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
-                                               job_id, api_file_size, api_file_size / (1024 * 1024))
-                            elif 'file_size' in response_data:
-                                extracted_size = response_data.get('file_size')
-                                if extracted_size:
-                                    api_file_size = extracted_size
-                                    logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
-                                               job_id, api_file_size, api_file_size / (1024 * 1024))
-                    except Exception as size_extract_exc:  # noqa: BLE001
-                        logger.debug("Upscale job {}: could not extract file_size from API response: {}", job_id, size_extract_exc)
-
-                # Use resolve_image_asset which properly handles queue API authorization
-                asset = resolve_image_asset(result_url)
-                logger.info("Upscale job {} successfully got result on attempt {}: asset.url={}, asset.content={}", 
-                           job_id, result_attempt + 1, asset.url[:100] if asset.url else "None", asset.content is not None)
-                # Check if asset.url is a queue API endpoint - if so, we need to get the actual image URL
-                if asset.url and (asset.url.startswith("https://queue.fal.run") or asset.url.startswith("http://queue.fal.run")):
-                    logger.warning("Upscale job {} asset.url is a queue API endpoint, this should not happen. asset.url={}", 
-                                  job_id, asset.url)
-                    # Try to get the actual result from queue_result
-                    from app.providers.fal.client import queue_result
-                    from app.providers.fal.images import _extract_image_url, ImageAsset, _parse_result_url
-                    parsed = _parse_result_url(result_url)
-                    if parsed:
-                        model_path, request_id = parsed
-                        logger.info("Upscale job {} trying queue_result directly for model={}, request_id={}", 
-                                   job_id, model_path, request_id)
-                        response_data = queue_result(model_path, request_id)
-                        logger.info("Upscale job {} queue_result response keys: {}", job_id, list(response_data.keys()) if isinstance(response_data, dict) else "not a dict")
-                        actual_image_url = _extract_image_url(response_data)
-                        # Try to extract file_size from response_data
-                        if isinstance(response_data, dict):
-                            # Check common structures: {'image': {'file_size': ...}} or {'file_size': ...}
-                            if 'image' in response_data and isinstance(response_data['image'], dict):
-                                api_file_size = response_data['image'].get('file_size')
-                            elif 'file_size' in response_data:
-                                api_file_size = response_data['file_size']
-                            if api_file_size:
-                                logger.info("Upscale job {}: extracted file_size {} bytes ({:.2f}MB) from API response", 
-                                           job_id, api_file_size, api_file_size / (1024 * 1024))
-                        if actual_image_url and not (actual_image_url.startswith("https://queue.fal.run") or actual_image_url.startswith("http://queue.fal.run")):
-                            logger.info("Upscale job {} extracted actual image URL: {}", job_id, actual_image_url[:100])
-                            asset = ImageAsset(url=actual_image_url, content=None, filename=None)
-                        else:
-                            logger.error("Upscale job {} failed to extract valid image URL from queue_result response", job_id)
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_result_error = exc
-                # Check if it's an HTTP error that we can retry
-                if isinstance(exc, httpx.HTTPStatusError):
-                    status_code = exc.response.status_code
-                    if status_code in (500, 502, 503, 401) and result_attempt < max_result_attempts - 1:
-                        logger.warning(
-                            "Upscale job {} result attempt {} failed with {}: {}. Retrying in {:.1f}s",
-                            job_id,
-                            result_attempt + 1,
-                            status_code,
-                            exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
-                            result_delay,
-                        )
-                        time.sleep(result_delay)
-                        result_delay *= 1.5
-                        continue
-                    else:
-                        logger.error("Upscale job {} result attempt {} failed with {}: {}", job_id, result_attempt + 1, status_code, exc)
-                        raise
-                else:
-                    logger.error("Upscale job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
-                    if result_attempt >= max_result_attempts - 1:
-                        raise
-
-        if asset is None:
-            error = last_result_error or RuntimeError("Failed to get upscale result")
-            logger.error("Upscale job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
-            if job:
-                job.meta["error"] = str(error)
-                job.save_meta()
-            if notify_options.get("chat_id"):
-                _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
-            raise RuntimeError(str(error))
-
-    if asset is None:
-        raise RuntimeError("fal upscale did not return an asset")
-
-    # Use same approach as Smart merge - send by URL directly
-    # This avoids download timeouts and Telegram handles the download server-side
-    # send_document with URL doesn't compress files, so quality is preserved
-    saved_path = _persist_asset(asset, output_file.as_posix(), skip_download=True)
-    logger.info("Upscale: _persist_asset returned saved_path={}, asset.url={}, asset.content={}", 
-                saved_path, asset.url, asset.content is not None)
-
-    # Schedule background download for caching, but don't block sending
-    if asset.url:
-        _schedule_result_download(job_id, asset.url, output_file)
-        logger.debug("Scheduled background download for upscale result: {} -> {}", asset.url, output_file)
-
-    caption_url = asset.url
-    image_bytes = asset.content
-    filename = asset.filename
-
-    # If no image_bytes but saved_path exists, read file (for fallback)
-    if image_bytes is None and saved_path and saved_path.exists():
-        try:
-            image_bytes = saved_path.read_bytes()
-            filename = filename or saved_path.name
-            logger.debug("Read upscale result from file: {} ({} bytes)", saved_path, len(image_bytes))
-        except Exception as read_exc:  # noqa: BLE001
-            logger.warning("Failed to read saved upscale result {}: {}", saved_path, read_exc)
-
-    if job:
-        if asset.url:
-            job.meta["image_url"] = asset.url
-        if asset.content:
-            job.meta["image_inline"] = True
-            if asset.filename:
-                job.meta["image_filename"] = asset.filename
-        if saved_path:
-            job.meta["result_path"] = saved_path.as_posix()
-        else:
-            job.meta["result_path"] = None
-        job.save_meta()
-
-    if notify_options.get("chat_id"):
-        try:
-            logger.info(
-                "Sending upscale notification: job_id={}, has_bytes={}, has_url={}, filename={}",
-                job_id,
-                image_bytes is not None,
-                bool(caption_url),
-                filename,
-            )
-            if image_bytes is not None:
-                _send_success_notification_sync(
-                    notify_options,
-                    job_id,
-                    image_bytes=image_bytes,
-                    filename=filename,
-                    caption_title="🔍 Улучшение изображения готово!",
-                    reply_markup=None,
-                )
-                logger.info("Upscale notification sent successfully with image bytes")
-            elif caption_url:
-                _send_success_notification_sync(
-                    notify_options,
-                    job_id,
-                    image_url=caption_url,
-                    caption_title="🔍 Улучшение изображения готово!",
-                    reply_markup=None,
-                )
-                logger.info("Upscale notification sent successfully with image URL")
-            else:
-                logger.error("Upscale job {}: no image_bytes and no image_url to send", job_id)
-        except Exception as notify_error:  # noqa: BLE001
-            logger.error("Failed to send Telegram notification for upscale job {}: {}", job_id, notify_error, exc_info=True)
-
-    # Confirm operation after successful completion
-    if operation_id:
-        db = SessionLocal()
-        try:
-            success = BillingService.confirm_operation(db, operation_id)
-            if success:
-                logger.info("Confirmed operation {} for upscale job {}", operation_id, job_id)
-            else:
-                logger.error("Failed to confirm operation {} for upscale job {}", operation_id, job_id)
-        except Exception as e:
-            logger.error("Error confirming operation {} for upscale job {}: {}", operation_id, job_id, e, exc_info=True)
-        finally:
-            db.close()
-
-    return caption_url or ""
+        raise

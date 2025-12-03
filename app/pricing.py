@@ -5,7 +5,7 @@ from loguru import logger
 
 # Base prices from environment or defaults
 PRICE_NANO_BANANA_PRO = float(os.getenv("PRICE_NANO_BANANA_PRO", "26"))
-PRICE_FLUX2FLEX = float(os.getenv("PRICE_FLUX2FLEX", "12"))  # Цена для Flux 2 Flex
+PRICE_FLUX2FLEX = float(os.getenv("PRICE_FLUX2FLEX", "15"))  # Цена для Flux 2 Flex
 PRICE_OTHER_MODELS = float(os.getenv("PRICE_OTHER_MODELS", "9"))
 PRICE_SEEDREAM = float(os.getenv("PRICE_SEEDREAM", "7.5"))  # Цена для Seedream в операциях generate и edit
 PRICE_PROMPT_GENERATION = float(os.getenv("PRICE_PROMPT_GENERATION", "3"))
@@ -82,7 +82,7 @@ def get_operation_price(
         if is_nano_banana_pro or (model and _is_nano_banana_pro_model(model)):
             return OPERATION_PRICES["generate_nano_banana_pro"]
         if is_flux2flex:
-            return PRICE_FLUX2FLEX  # 12 рублей для Flux 2 Flex
+            return PRICE_FLUX2FLEX  # 15 рублей для Flux 2 Flex
         if is_seedream:
             return PRICE_SEEDREAM  # 7.5 рублей для Seedream
         return OPERATION_PRICES["generate_other"]
@@ -122,8 +122,8 @@ def get_operation_description(operation_type: str) -> str:
 
 
 def get_all_prices() -> Dict[str, float]:
-    """Get all operation prices for display, sorted by price in descending order."""
-    prices = {
+    """Get all operation prices for display."""
+    return {
         "Nano Banana Pro (генерация/объединение)": PRICE_NANO_BANANA_PRO,
         "Flux 2 Flex (генерация)": PRICE_FLUX2FLEX,
         "Seedream (генерация/редактирование)": PRICE_SEEDREAM,
@@ -133,8 +133,6 @@ def get_all_prices() -> Dict[str, float]:
         "Замена лица": PRICE_FACE_SWAP,
         "Добавление текста": PRICE_ADD_TEXT,
     }
-    # Сортируем по убыванию цены
-    return dict(sorted(prices.items(), key=lambda x: x[1], reverse=True))
 
 
 def _is_nano_banana_pro_model(model: str) -> bool:

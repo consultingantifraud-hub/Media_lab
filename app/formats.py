@@ -420,27 +420,28 @@ def get_model_format_mapping(
         format_params = format_mapping.get(format_id, {"image_size": "square_hd"})
         result.update(format_params)
         result["aspect_ratio"] = spec.aspect_ratio  # Сохраняем для информации
-    elif "flux-2-pro" in model.lower():
-        # Flux 2 Pro Edit поддерживает width и height напрямую
-        # Используем оптимальные размеры для каждого формата (высокое разрешение)
-        format_sizes = {
-            ImageFormat.SQUARE_1_1: (1024, 1024),
-            ImageFormat.VERTICAL_3_4: (768, 1024),
-            ImageFormat.HORIZONTAL_4_3: (1024, 768),
-            ImageFormat.VERTICAL_4_5: (1024, 1280),
-            ImageFormat.VERTICAL_9_16: (1024, 1792),
-            ImageFormat.HORIZONTAL_16_9: (1792, 1024),
-        }
-        width, height = format_sizes.get(format_id, (1024, 1024))
-        result.update({
-            "width": width,
-            "height": height,
-            "size": f"{width}x{height}",
-        })
-        # Логируем для отладки
-        from loguru import logger
-        logger.info("get_model_format_mapping: Flux 2 Pro detected! model='{}', format_id='{}', returning width={}, height={}", 
-                   model, format_id.value, width, height)
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # elif "flux-2-pro" in model.lower():
+    #     # Flux 2 Pro Edit поддерживает width и height напрямую
+    #     # Используем оптимальные размеры для каждого формата (высокое разрешение)
+    #     format_sizes = {
+    #         ImageFormat.SQUARE_1_1: (1024, 1024),
+    #         ImageFormat.VERTICAL_3_4: (768, 1024),
+    #         ImageFormat.HORIZONTAL_4_3: (1024, 768),
+    #         ImageFormat.VERTICAL_4_5: (1024, 1280),
+    #         ImageFormat.VERTICAL_9_16: (1024, 1792),
+    #         ImageFormat.HORIZONTAL_16_9: (1792, 1024),
+    #     }
+    #     width, height = format_sizes.get(format_id, (1024, 1024))
+    #     result.update({
+    #         "width": width,
+    #         "height": height,
+    #         "size": f"{width}x{height}",
+    #     })
+    #     # Логируем для отладки
+    #     from loguru import logger
+    #     logger.info("get_model_format_mapping: Flux 2 Pro detected! model='{}', format_id='{}', returning width={}, height={}", 
+    #                model, format_id.value, width, height)
     else:
         # Для остальных моделей используем aspect_ratio по умолчанию
         result["aspect_ratio"] = spec.aspect_ratio

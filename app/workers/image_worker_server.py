@@ -1119,6 +1119,12 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
     is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
     is_flux2flex = "flux-2-flex" in model_name.lower() or selected_model == "flux2flex-create"
     
+    # Детальное логирование для отладки Flux 2 Flex
+    if is_flux2flex:
+        logger.info("Image job {}: Flux 2 Flex DETECTED - model_name='{}', selected_model='{}', BEFORE adjustment - guidance_scale={}, num_inference_steps={}", 
+                   job_id, model_name, selected_model, 
+                   provider_options.get("guidance_scale"), provider_options.get("num_inference_steps"))
+    
     # Для Nano Banana, Flux 2 Flex используем оригинальный русский промпт БЕЗ перевода
     if is_nano_banana or is_flux2flex:
         provider_prompt = prompt  # Используем оригинальный русский промпт
@@ -1192,18 +1198,40 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
 
         # Используем обычную логику через очередь для всех моделей
         model_name = provider_options.get("model", "")
+        selected_model = provider_options.get("selected_model", "")  # Получаем selected_model из options
         
-        # Применяем настройки качества для Flux 2 Flex (максимальный guidance_scale = 10.0, это лимит API)
+        # Переопределяем is_flux2flex на основе актуального model_name (на случай если модель изменилась)
+        is_flux2flex = "flux-2-flex" in model_name.lower() or selected_model == "flux2flex-create"
+        
+        logger.info("Image job {}: Checking Flux 2 Flex - model_name='{}', selected_model='{}', is_flux2flex={}", 
+                   job_id, model_name, selected_model, is_flux2flex)
+        
+        # Применяем настройки качества для Flux 2 Flex (оптимальные значения для естественного вида)
         if is_flux2flex:
-            # Устанавливаем максимальный guidance_scale для лучшего следования инструкциям (максимум 10.0 для Flux 2 Flex)
-            current_guidance = provider_options.get("guidance_scale", 10.0)
-            if current_guidance < 10.0:
-                provider_options["guidance_scale"] = 10.0
-                logger.info("Image job {}: Set guidance_scale to 10.0 (max for Flux 2 Flex) to improve text generation quality", job_id)
-            elif current_guidance > 10.0:
-                # Если значение больше 10.0, ограничиваем до максимума
-                provider_options["guidance_scale"] = 10.0
-                logger.warning("Image job {}: guidance_scale was {}, limited to 10.0 (max for Flux 2 Flex)", job_id, current_guidance)
+            logger.info("Image job {}: Flux 2 Flex ADJUSTMENT - BEFORE: guidance_scale={}, num_inference_steps={}", 
+                       job_id, provider_options.get("guidance_scale"), provider_options.get("num_inference_steps"))
+            # Используем оптимальные значения для более естественного вида изображений
+            # Слишком высокие значения приводят к передетализации и неестественному виду
+            current_guidance = provider_options.get("guidance_scale", 5.0)
+            if current_guidance > 7.0:
+                # Ограничиваем до 7.0 для более естественного вида (было 10.0 - слишком детализировано)
+                provider_options["guidance_scale"] = 7.0
+                logger.info("Image job {}: Limited guidance_scale to 7.0 for Flux 2 Flex (was {}) to avoid over-detailing", job_id, current_guidance)
+            elif current_guidance < 3.5:
+                # Минимальное значение для приемлемого качества
+                provider_options["guidance_scale"] = 3.5
+                logger.info("Image job {}: Set guidance_scale to 3.5 (min for Flux 2 Flex) for acceptable quality", job_id)
+            
+            # Также ограничиваем num_inference_steps для более естественного вида
+            current_steps = provider_options.get("num_inference_steps", 28)
+            if current_steps > 35:
+                # Ограничиваем до 35 для более естественного вида (было 50 - слишком детализировано)
+                provider_options["num_inference_steps"] = 35
+                logger.info("Image job {}: Limited num_inference_steps to 35 for Flux 2 Flex (was {}) to avoid over-detailing", job_id, current_steps)
+            elif current_steps < 20:
+                # Минимальное значение для приемлемого качества
+                provider_options["num_inference_steps"] = 20
+                logger.info("Image job {}: Set num_inference_steps to 20 (min for Flux 2 Flex) for acceptable quality", job_id)
         
         # Применяем настройки качества для nano-banana (обычный и pro)
         is_nano_banana_regular = model_name == "fal-ai/nano-banana" or ("nano-banana" in model_name.lower() and "pro" not in model_name.lower())
@@ -1240,6 +1268,10 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
         logger.info("Image job {}: provider_options keys: {}, width: {}, height: {}, num_inference_steps: {}, guidance_scale: {}", 
                    job_id, list(provider_options.keys()), provider_options.get("width"), provider_options.get("height"), 
                    provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
+        # Дополнительное логирование для Flux 2 Flex
+        if is_flux2flex:
+            logger.info("Image job {}: Flux 2 Flex FINAL parameters - num_inference_steps: {}, guidance_scale: {}", 
+                       job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
         task_id = submit_image(prompt=provider_prompt, **provider_options)
         asset = None
 
@@ -1394,17 +1426,53 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                         except Exception as exc:  # noqa: BLE001
                             last_result_error = exc
                             logger.error("Image job {} result attempt {} failed: {}", job_id, result_attempt + 1, exc)
+                            # Проверяем, не является ли это ошибкой content policy violation
+                            error_str = str(exc)
+                            if "content policy violation" in error_str.lower() or "content checker" in error_str.lower():
+                                # Это ошибка политики контента - отправляем понятное сообщение пользователю
+                                user_error_msg = (
+                                    "❌ Запрос отклонен системой безопасности.\n\n"
+                                    "Ваш промпт содержит контент, который не может быть обработан из-за политики безопасности.\n\n"
+                                    "Попробуйте изменить промпт, убрав или изменив проблемные элементы."
+                                )
+                                logger.warning("Image job {} rejected by content policy", job_id)
+                                if job:
+                                    job.meta["error"] = "Content policy violation"
+                                    job.save_meta()
+                                if notify_options.get("chat_id"):
+                                    _send_failure_notification_sync(notify_options, job_id, user_error_msg)
+                                raise RuntimeError("Content policy violation") from exc
                             if result_attempt >= max_result_attempts - 1:
                                 raise
 
                     if asset is None:
                         error = last_result_error or RuntimeError("Failed to get image result")
+                        error_str = str(error)
                         logger.error("Image job {} failed to get result after {} attempts: {}", job_id, max_result_attempts, error)
+                        
+                        # Формируем понятное сообщение для пользователя в зависимости от типа ошибки
+                        if "content policy violation" in error_str.lower() or "content checker" in error_str.lower():
+                            user_error_msg = (
+                                "❌ Запрос отклонен системой безопасности.\n\n"
+                                "Ваш промпт содержит контент, который не может быть обработан из-за политики безопасности.\n\n"
+                                "Попробуйте изменить промпт, убрав или изменив проблемные элементы."
+                            )
+                        elif "fal response did not include an image url" in error_str.lower():
+                            user_error_msg = (
+                                "❌ Не удалось получить изображение.\n\n"
+                                "Сервис генерации не вернул результат. Возможные причины:\n"
+                                "• Запрос был отклонен системой безопасности\n"
+                                "• Временные проблемы с сервисом\n\n"
+                                "Попробуйте изменить промпт или повторить запрос позже."
+                            )
+                        else:
+                            user_error_msg = f"Не удалось получить результат: {error}"
+                        
                         if job:
                             job.meta["error"] = str(error)
                             job.save_meta()
                         if notify_options.get("chat_id"):
-                            _send_failure_notification_sync(notify_options, job_id, f"Не удалось получить результат: {error}")
+                            _send_failure_notification_sync(notify_options, job_id, user_error_msg)
                         raise RuntimeError(str(error))
 
         image_url = asset.url
@@ -1541,12 +1609,60 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
                 db.close()
         raise
     except Exception as e:
+        error_str = str(e)
+        error_type = type(e).__name__
+        
+        # Формируем понятное сообщение для пользователя в зависимости от типа ошибки
+        user_error_msg = None
+        
+        if "content policy violation" in error_str.lower() or "content checker" in error_str.lower():
+            user_error_msg = (
+                "❌ Запрос отклонен системой безопасности.\n\n"
+                "Ваш промпт содержит контент, который не может быть обработан из-за политики безопасности.\n\n"
+                "Попробуйте изменить промпт, убрав или изменив проблемные элементы."
+            )
+        elif "fal response did not include an image url" in error_str.lower():
+            user_error_msg = (
+                "❌ Не удалось получить изображение.\n\n"
+                "Сервис генерации не вернул результат. Возможные причины:\n"
+                "• Запрос был отклонен системой безопасности\n"
+                "• Временные проблемы с сервисом\n\n"
+                "Попробуйте изменить промпт или повторить запрос позже."
+            )
+        elif isinstance(e, httpx.HTTPStatusError):
+            status_code = e.response.status_code if hasattr(e, 'response') else None
+            if status_code == 422:
+                user_error_msg = (
+                    "❌ Некорректные параметры запроса.\n\n"
+                    "Запрос был отклонен сервисом. Возможные причины:\n"
+                    "• Промпт содержит контент, нарушающий политику безопасности\n"
+                    "• Некорректные параметры генерации\n\n"
+                    "Попробуйте изменить промпт или параметры."
+                )
+            elif status_code == 429:
+                user_error_msg = (
+                    "❌ Превышен лимит запросов.\n\n"
+                    "Слишком много запросов к сервису генерации. Пожалуйста, подождите немного и попробуйте снова."
+                )
+            elif status_code in (500, 502, 503):
+                user_error_msg = (
+                    "❌ Временная проблема с сервисом.\n\n"
+                    "Сервис генерации временно недоступен. Пожалуйста, попробуйте позже."
+                )
+        
+        # Если есть понятное сообщение для пользователя, отправляем его
+        if user_error_msg and notify_options and notify_options.get("chat_id"):
+            try:
+                _send_failure_notification_sync(notify_options, job_id, user_error_msg)
+            except Exception as notify_exc:
+                logger.error("Failed to send error notification for job {}: {}", job_id, notify_exc)
+        
         # Mark operation as failed on any error
         if operation_id:
             db = SessionLocal()
             try:
                 BillingService.fail_operation(db, operation_id)
-                logger.info("Marked operation {} as failed for job {} due to error", operation_id, job_id)
+                logger.info("Marked operation {} as failed for job {} due to error: {}", operation_id, job_id, error_type)
             except Exception as fail_error:
                 logger.error("Error failing operation {} for job {}: {}", operation_id, job_id, fail_error, exc_info=True)
             finally:
@@ -2342,21 +2458,57 @@ def process_smart_merge_job(
     operation_id = _parse_operation_id(operation_id_raw, job_id, "Smart merge")
     provider_prompt = provider_options.pop("provider_prompt", prompt)
     provider_options.setdefault("model", SMART_MERGE_DEFAULT_MODEL)
-    # Если есть width и height, не устанавливаем size по умолчанию
-    # (width и height имеют приоритет в _build_input_payload)
+    
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # # КРИТИЧЕСКИ ВАЖНО: Для Flux 2 Pro Edit проверяем размеры ПЕРЕД установкой дефолтных значений
+    # model_name = provider_options.get("model", "")
+    # is_flux2pro = "flux-2-pro" in model_name.lower() and "/edit" in model_name.lower()
+    # 
+    # # Логируем все параметры для отладки
+    # logger.info("Smart merge job {}: Initial provider_options keys: {}", job_id, list(provider_options.keys()))
+    # logger.info("Smart merge job {}: width={}, height={}, size={}, aspect_ratio={}", 
+    #            job_id, provider_options.get("width"), provider_options.get("height"), 
+    #            provider_options.get("size"), provider_options.get("aspect_ratio"))
+    # 
+    # # Если есть width и height, не устанавливаем size по умолчанию
+    # # (width и height имеют приоритет в _build_input_payload)
+    # if "width" not in provider_options or "height" not in provider_options:
+    #     # Для Flux 2 Pro Edit не устанавливаем дефолтные значения, если размеры не заданы
+    #     # Размеры должны быть переданы из формата
+    #     if not is_flux2pro:
+    #         provider_options.setdefault("size", SMART_MERGE_DEFAULT_SIZE)
+    #         provider_options.setdefault("aspect_ratio", SMART_MERGE_DEFAULT_ASPECT_RATIO)
+    #     else:
+    #         logger.error("Smart merge job {}: Flux 2 Pro Edit detected but width/height not found in provider_options! Available keys: {}", 
+    #                       job_id, list(provider_options.keys()))
+    #         # Устанавливаем дефолтные размеры для Flux 2 Pro, если они не переданы
+    #         provider_options.setdefault("width", 1024)
+    #         provider_options.setdefault("height", 1024)
+    #         logger.warning("Smart merge job {}: Using default 1024x1024 for Flux 2 Pro Edit", job_id)
+    
+    # Для всех моделей устанавливаем дефолтные значения, если нет width и height
     if "width" not in provider_options or "height" not in provider_options:
         provider_options.setdefault("size", SMART_MERGE_DEFAULT_SIZE)
         provider_options.setdefault("aspect_ratio", SMART_MERGE_DEFAULT_ASPECT_RATIO)
 
-    # Проверяем, является ли модель Nano-banana (может принимать русский текст)
+    # Проверяем, является ли модель Nano-banana (могут принимать русский текст)
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
     model_name = provider_options.get("model", "")
+    logger.info("Smart merge job {}: Processing with model='{}', image_sources count={}", job_id, model_name, len(image_sources) if image_sources else 0)
     is_nano_banana_regular = model_name == SMART_MERGE_DEFAULT_MODEL or model_name == "fal-ai/nano-banana" or ("nano-banana" in model_name.lower() and "pro" not in model_name.lower())
     is_nano_banana_pro = "nano-banana-pro" in model_name.lower()
     is_nano_banana = is_nano_banana_regular or is_nano_banana_pro
+    # is_flux2pro = "flux-2-pro" in model_name.lower() and "/edit" in model_name.lower()
+    # 
+    # # Логируем детали для Flux 2 Pro
+    # if is_flux2pro:
+    #     logger.info("Smart merge job {}: Flux 2 Pro Edit detected! image_sources={}", job_id, image_sources)
 
-    if is_nano_banana:
+    if is_nano_banana:  # or is_flux2pro:
         # Для Nano-banana не переводим промпт, используем оригинальный русский
-        logger.info("Smart merge job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
+        # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit
+        model_type = "Nano Banana Pro" if is_nano_banana_pro else "Nano Banana"
+        logger.info("Smart merge job {}: {} model detected, using original Russian prompt without translation", job_id, model_type)
         provider_prompt = prompt  # Используем оригинальный промпт без перевода
     
     # Применяем настройки качества для nano-banana (обычный и pro) и seedream в Smart Merge
@@ -2377,6 +2529,18 @@ def process_smart_merge_job(
             provider_options["guidance_scale"] = 11.0  # Оптимизированное значение вместо 8.5
         logger.info("Smart merge job {}: Using parameters for nano-banana-pro: num_inference_steps={}, guidance_scale={}", 
                    job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # elif is_flux2pro:
+    #     # Применяем улучшенные настройки качества для Flux 2 Pro Edit
+    #     # Flux 2 Pro поддерживает multi-reference editing (до 6 референсов), поэтому важно правильно передать image_urls
+    #     if "num_inference_steps" not in provider_options:
+    #         provider_options["num_inference_steps"] = 100  # Увеличено до 100 для максимального качества и сходства с референсом
+    #     if "guidance_scale" not in provider_options:
+    #         provider_options["guidance_scale"] = 7.5  # Увеличено до 7.5 для максимального следования промпту и референсам
+    #     # Логируем размеры для проверки
+    #     logger.info("Smart merge job {}: Applied enhanced quality settings for Flux 2 Pro Edit: num_inference_steps={}, guidance_scale={}, image_sources count={}, width={}, height={}, size={}", 
+    #                job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"), 
+    #                len(image_sources) if image_sources else 0, provider_options.get("width"), provider_options.get("height"), provider_options.get("size"))
     elif is_seedream:
         # Применяем максимальные настройки качества для Seedream (увеличенная прорисовка и детализация)
         provider_options["num_inference_steps"] = 120
@@ -2411,14 +2575,15 @@ def process_smart_merge_job(
             provider_prompt,
         )
 
-        # Для nano-banana/edit, nano-banana-pro/edit и seedream/edit используем асинхронный режим через queue API
+        # Для nano-banana/edit, nano-banana-pro/edit, flux-2-pro/edit и seedream/edit используем асинхронный режим через queue API
         # чтобы не блокировать worker'ы при высокой нагрузке
         model_name = provider_options.get("model", "")
         is_nano_banana_edit = "nano-banana" in model_name.lower() and "/edit" in model_name.lower() and "pro" not in model_name.lower()
         is_nano_banana_pro_edit = "nano-banana-pro" in model_name.lower() and "/edit" in model_name.lower()
+        is_flux2pro_edit = "flux-2-pro" in model_name.lower() and "/edit" in model_name.lower()
         is_seedream_edit = "seedream" in model_name.lower() and "/edit" in model_name.lower()
         
-        if is_nano_banana_edit or is_nano_banana_pro_edit or is_seedream_edit:
+        if is_nano_banana_edit or is_nano_banana_pro_edit or is_flux2pro_edit or is_seedream_edit:
             # Используем асинхронный режим для nano-banana/edit, nano-banana-pro/edit и seedream/edit
             from app.providers.fal.images import submit_smart_merge
             from app.providers.fal.images import check_status as check_image_status
@@ -2427,6 +2592,8 @@ def process_smart_merge_job(
             
             if is_nano_banana_pro_edit:
                 logger.info("Smart merge job {}: Using asynchronous queue mode for nano-banana-pro/edit", job_id)
+            elif is_flux2pro_edit:
+                logger.info("Smart merge job {}: Using asynchronous queue mode for flux-2-pro/edit", job_id)
             elif is_seedream_edit:
                 logger.info("Smart merge job {}: Using asynchronous queue mode for seedream/edit", job_id)
             else:

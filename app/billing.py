@@ -1,5 +1,4 @@
 """Billing handlers for Telegram bot."""
-import asyncio
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -193,10 +192,7 @@ async def show_balance(message: Message, state: FSMContext = None):
     
     db = SessionLocal()
     try:
-        # Check for pending payments and update if needed (async, non-blocking)
-        # ВАЖНО: Не блокируем обработку баланса проверкой платежей
-        # Проверка платежей может занимать до 60+ секунд из-за timeout и retry
-        # Выполняем проверку в фоне через asyncio.create_task
+        # Check for pending payments and update if needed
         from app.services.payment import PaymentService
         from app.db.models import Payment, PaymentStatus, User
         user_obj = db.query(User).filter(User.telegram_id == message.from_user.id).first()
@@ -206,30 +202,15 @@ async def show_balance(message: Message, state: FSMContext = None):
                 Payment.status == PaymentStatus.PENDING
             ).order_by(Payment.created_at.desc()).limit(1).all()
             
-            # Запускаем проверку платежей в фоне, не блокируя ответ пользователю
-            if pending_payments:
-                async def check_payments_background():
-                    """Check payment status in background without blocking."""
-                    db_bg = SessionLocal()
+            for payment in pending_payments:
+                if payment.yookassa_payment_id:
+                    # Check status from YooKassa (silently, don't show errors to user)
                     try:
-                        for payment in pending_payments:
-                            if payment.yookassa_payment_id:
-                                # Check status from YooKassa (silently, don't show errors to user)
-                                try:
-                                    # Используем run_in_executor для синхронной функции
-                                    loop = asyncio.get_event_loop()
-                                    await loop.run_in_executor(
-                                        None,
-                                        PaymentService.check_payment_status_from_yookassa,
-                                        db_bg, payment.yookassa_payment_id
-                                    )
-                                except Exception as e:
-                                    logger.debug(f"Error checking payment status in background: {e}")
-                    finally:
-                        db_bg.close()
-                
-                # Запускаем проверку в фоне, не ждем результата
-                asyncio.create_task(check_payments_background())
+                        PaymentService.check_payment_status_from_yookassa(
+                            db, payment.yookassa_payment_id
+                        )
+                    except Exception as e:
+                        logger.debug(f"Error checking payment status: {e}")
         
         user_info = BillingService.get_user_info(db, message.from_user.id)
         if not user_info:
@@ -257,12 +238,6 @@ async def show_balance(message: Message, state: FSMContext = None):
         # Get prices for display (already sorted by price in descending order)
         prices = get_all_prices()
         
-        # Отладочное логирование для проверки Flux 2 Flex
-        logger.debug(f"show_balance: All prices keys: {list(prices.keys())}")
-        logger.debug(f"show_balance: Flux 2 Flex in prices: {'Flux 2 Flex (генерация)' in prices}")
-        if "Flux 2 Flex (генерация)" in prices:
-            logger.debug(f"show_balance: Flux 2 Flex price: {prices['Flux 2 Flex (генерация)']}")
-        
         # Формируем список услуг с ценами (уже отсортирован по убыванию)
         services_list = []
         for service_name, price in prices.items():
@@ -276,16 +251,13 @@ async def show_balance(message: Message, state: FSMContext = None):
             elif service_name == "Nano Banana (генерация/редактирование)":
                 services_list.append(f"• Nano Banana: {price} ₽")
             elif service_name == "Остальные модели (генерация/редактирование/объединение/ретушь/upscale)":
-                services_list.append(f"• Ретушь, Улучшить: {price} ₽")
+                services_list.append(f"• Остальные модели: {price} ₽")
             elif service_name == "Генерация промпта":
                 services_list.append(f"• Генерация промпта: {price} ₽")
             elif service_name == "Замена лица":
                 services_list.append(f"• Замена лица: {price} ₽")
             elif service_name == "Добавление текста":
                 services_list.append(f"• Добавление текста: {price} ₽")
-            else:
-                # Добавляем все остальные услуги, которые не были обработаны
-                services_list.append(f"• {service_name}: {price} ₽")
         
         services_text = "\n".join(services_list)
         
@@ -500,16 +472,13 @@ async def callback_payment_menu(callback: CallbackQuery, state: FSMContext):
             elif service_name == "Nano Banana (генерация/редактирование)":
                 services_list.append(f"• Nano Banana: {price} ₽")
             elif service_name == "Остальные модели (генерация/редактирование/объединение/ретушь/upscale)":
-                services_list.append(f"• Ретушь, Улучшить: {price} ₽")
+                services_list.append(f"• Остальные модели: {price} ₽")
             elif service_name == "Генерация промпта":
                 services_list.append(f"• Генерация промпта: {price} ₽")
             elif service_name == "Замена лица":
                 services_list.append(f"• Замена лица: {price} ₽")
             elif service_name == "Добавление текста":
                 services_list.append(f"• Добавление текста: {price} ₽")
-            else:
-                # Добавляем все остальные услуги, которые не были обработаны
-                services_list.append(f"• {service_name}: {price} ₽")
         
         services_text = "\n".join(services_list)
         
@@ -574,29 +543,16 @@ async def callback_payment_amount(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        # Создаем платеж асинхронно, чтобы не блокировать ответ пользователю
-        await callback.answer("⏳ Создаю платеж...")
-        
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        try:
-            payment_result = await loop.run_in_executor(
-                None,
-                PaymentService.create_payment,
-                db,
-                user.id,
-                amount,
-                f"Пополнение баланса на {amount}₽",
-                user.email
-            )
-        except Exception as e:
-            logger.error(f"Error creating payment in background: {e}", exc_info=True)
-            await callback.answer("❌ Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
-            return
+        payment_result = PaymentService.create_payment(
+            db,
+            user.id,
+            amount,
+            f"Пополнение баланса на {amount}₽",
+            user.email
+        )
 
         if not payment_result:
-            await callback.answer("❌ Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
+            await callback.answer("Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
             return
 
         confirmation_url = payment_result["confirmation_url"]
@@ -711,59 +667,27 @@ async def process_custom_amount(message: Message, state: FSMContext):
                     discount_amount = int(amount * discount_percent / 100)
                     final_amount = amount - discount_amount
             
-            # Создаем платеж асинхронно, чтобы не блокировать ответ пользователю
-            # PaymentService.create_payment может занимать до 60+ секунд из-за timeout и retry
-            import asyncio
-            loop = asyncio.get_event_loop()
-            
-            # Показываем пользователю, что платеж обрабатывается
-            processing_msg = await message.answer("⏳ Создаю платеж...")
-            
-            try:
-                payment_result = await loop.run_in_executor(
-                    None,
-                    PaymentService.create_payment,
-                    db,
-                    user.id,
-                    final_amount,
-                    f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
-                    user.email
-                )
-            except Exception as e:
-                logger.error(f"Error creating payment in background: {e}", exc_info=True)
-                await processing_msg.delete()
-                await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
-                return
-            
-            # Удаляем сообщение "Создаю платеж..."
-            try:
-                await processing_msg.delete()
-            except Exception as del_err:
-                logger.warning(f"Failed to delete processing message: {del_err}")
+            payment_result = PaymentService.create_payment(
+                db,
+                user.id,
+                final_amount,
+                f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
+                user.email
+            )
 
             if not payment_result:
-                logger.error(f"Payment creation returned None for user_id={user.id}, amount={amount}₽")
-                await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
+                await message.answer("Ошибка при создании платежа. Попробуйте позже.")
                 return
-
-            logger.info(f"Payment created successfully: payment_id={payment_result.get('payment_id')}, confirmation_url={payment_result.get('confirmation_url', 'N/A')[:50]}...")
 
             # Apply discount to payment if code was used
             if discount_code:
-                try:
-                    is_valid, discount, _ = DiscountService.validate_discount_code(db, discount_code, user.id)
-                    if is_valid and not discount.is_free_generation:
-                        payment_id = payment_result["payment_id"]
-                        DiscountService.apply_discount_to_payment(db, discount, user.id, payment_id)
-                        await state.update_data(discount_code=None)  # Clear discount code after use
-                except Exception as discount_err:
-                    logger.error(f"Error applying discount: {discount_err}", exc_info=True)
+                is_valid, discount, _ = DiscountService.validate_discount_code(db, discount_code, user.id)
+                if is_valid and not discount.is_free_generation:
+                    payment_id = payment_result["payment_id"]
+                    DiscountService.apply_discount_to_payment(db, discount, user.id, payment_id)
+                    await state.update_data(discount_code=None)  # Clear discount code after use
 
-            confirmation_url = payment_result.get("confirmation_url")
-            if not confirmation_url:
-                logger.error(f"No confirmation_url in payment_result: {payment_result}")
-                await message.answer("❌ Ошибка: не получена ссылка на оплату. Попробуйте позже.")
-                return
+            confirmation_url = payment_result["confirmation_url"]
             
             payment_text = f"💳 **Платеж создан**\n\n"
             if discount_amount > 0:
@@ -791,17 +715,11 @@ async def process_custom_amount(message: Message, state: FSMContext):
                 ]
             ])
 
-            try:
-                await message.answer(
-                    payment_text,
-                    reply_markup=keyboard,
-                    parse_mode="Markdown"
-                )
-                logger.info(f"Payment message sent successfully to user_id={message.from_user.id}")
-            except Exception as send_err:
-                logger.error(f"Error sending payment message: {send_err}", exc_info=True)
-                await message.answer(f"❌ Ошибка при отправке сообщения о платеже. Ссылка: {confirmation_url}")
-            
+            await message.answer(
+                payment_text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
             await state.clear()
         finally:
             db.close()
@@ -854,43 +772,19 @@ async def process_email(message: Message, state: FSMContext):
                 discount_amount = int(amount * discount_percent / 100)
                 final_amount = amount - discount_amount
         
-        # Создаем платеж асинхронно, чтобы не блокировать ответ пользователю
-        # Показываем пользователю, что платеж обрабатывается
-        processing_msg = await message.answer("⏳ Создаю платеж...")
-        
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        try:
-            payment_result = await loop.run_in_executor(
-                None,
-                PaymentService.create_payment,
-                db,
-                user.id,
-                final_amount,
-                f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
-                email
-            )
-        except Exception as e:
-            logger.error(f"Error creating payment in background: {e}", exc_info=True)
-            await processing_msg.delete()
-            await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
-            await state.clear()
-            return
-        
-        # Удаляем сообщение "Создаю платеж..."
-        try:
-            await processing_msg.delete()
-        except Exception as del_err:
-            logger.warning(f"Failed to delete processing message: {del_err}")
+        # Create payment with email
+        payment_result = PaymentService.create_payment(
+            db,
+            user.id,
+            final_amount,
+            f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
+            email
+        )
         
         if not payment_result:
-            logger.error(f"Payment creation returned None for user_id={user.id}, amount={amount}₽")
-            await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
+            await message.answer("Ошибка при создании платежа. Попробуйте позже.")
             await state.clear()
             return
-
-        logger.info(f"Payment created successfully: payment_id={payment_result.get('payment_id')}, confirmation_url={payment_result.get('confirmation_url', 'N/A')[:50]}...")
         
         # Apply discount to payment if code was used
         if discount_code:
@@ -900,12 +794,7 @@ async def process_email(message: Message, state: FSMContext):
                 DiscountService.apply_discount_to_payment(db, discount, user.id, payment_id)
                 await state.update_data(discount_code=None)
         
-        confirmation_url = payment_result.get("confirmation_url")
-        if not confirmation_url:
-            logger.error(f"No confirmation_url in payment_result: {payment_result}")
-            await message.answer("❌ Ошибка: не получена ссылка на оплату. Попробуйте позже.")
-            await state.clear()
-            return
+        confirmation_url = payment_result["confirmation_url"]
         
         payment_text = f"💳 **Платеж создан**\n\n"
         if discount_amount > 0:
@@ -935,17 +824,11 @@ async def process_email(message: Message, state: FSMContext):
             ]
         ])
         
-        try:
-            await message.answer(
-                payment_text,
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
-            logger.info(f"Payment message sent successfully to user_id={message.from_user.id}")
-        except Exception as send_err:
-            logger.error(f"Error sending payment message: {send_err}", exc_info=True)
-            await message.answer(f"❌ Ошибка при отправке сообщения о платеже. Ссылка: {confirmation_url}")
-        
+        await message.answer(
+            payment_text,
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
         await state.clear()
         
     except Exception as e:

@@ -120,16 +120,52 @@ class PaymentService:
             auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
 
             # Use sync httpx client (service is called from sync context)
-            with httpx.Client(timeout=30.0) as client:
-                response = client.post(
-                    f"{YOOKASSA_API_URL}/payments",
-                    json=payment_data,
-                    headers={
-                        "Authorization": f"Basic {auth_b64}",
-                        "Content-Type": "application/json",
-                        "Idempotence-Key": payment_id_for_url
-                    }
-                )
+            # Увеличиваем timeout для SSL handshake и добавляем retry логику
+            # SSL handshake может занимать больше времени при проблемах с сетью
+            timeout_config = httpx.Timeout(
+                connect=60.0,  # Timeout for establishing connection (including SSL handshake) - увеличено до 60 сек
+                read=60.0,     # Timeout for reading response - увеличено до 60 сек
+                write=30.0,    # Timeout for writing request
+                pool=30.0      # Timeout for getting connection from pool
+            )
+            
+            # Retry логика для надежности
+            max_retries = 3
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    with httpx.Client(timeout=timeout_config) as client:
+                        response = client.post(
+                            f"{YOOKASSA_API_URL}/payments",
+                            json=payment_data,
+                            headers={
+                                "Authorization": f"Basic {auth_b64}",
+                                "Content-Type": "application/json",
+                                "Idempotence-Key": payment_id_for_url
+                            }
+                        )
+                    # Если запрос успешен, выходим из цикла retry
+                    break
+                except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, OSError) as e:
+                    # OSError может включать SSL handshake errors (_ssl.c:993: The handshake operation timed out)
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2  # 2, 4, 6 секунд
+                        logger.warning(f"YooKassa API request failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                        import time
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"YooKassa API request failed after {max_retries} attempts: {e}")
+                        raise
+                except Exception as e:
+                    # Для других ошибок не делаем retry
+                    last_exception = e
+                    raise
+            
+            # Если все попытки не удались, выбрасываем последнее исключение
+            if last_exception and 'response' not in locals():
+                raise last_exception
 
             if response.status_code != 200:
                 logger.error(f"YooKassa API error: {response.status_code}, {response.text}")
@@ -367,14 +403,50 @@ class PaymentService:
             auth_bytes = auth_string.encode("utf-8")
             auth_b64 = base64.b64encode(auth_bytes).decode("utf-8")
 
-            with httpx.Client(timeout=30.0) as client:
-                response = client.get(
-                    f"{YOOKASSA_API_URL}/payments/{yookassa_payment_id}",
-                    headers={
-                        "Authorization": f"Basic {auth_b64}",
-                        "Content-Type": "application/json",
-                    }
-                )
+            # Увеличиваем timeout для SSL handshake и добавляем retry логику
+            # SSL handshake может занимать больше времени при проблемах с сетью
+            timeout_config = httpx.Timeout(
+                connect=60.0,  # Timeout for establishing connection (including SSL handshake) - увеличено до 60 сек
+                read=60.0,     # Timeout for reading response - увеличено до 60 сек
+                write=30.0,    # Timeout for writing request
+                pool=30.0      # Timeout for getting connection from pool
+            )
+            
+            # Retry логика для надежности
+            max_retries = 3
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    with httpx.Client(timeout=timeout_config) as client:
+                        response = client.get(
+                            f"{YOOKASSA_API_URL}/payments/{yookassa_payment_id}",
+                            headers={
+                                "Authorization": f"Basic {auth_b64}",
+                                "Content-Type": "application/json",
+                            }
+                        )
+                    # Если запрос успешен, выходим из цикла retry
+                    break
+                except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, OSError) as e:
+                    # OSError может включать SSL handshake errors (_ssl.c:993: The handshake operation timed out)
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2  # 2, 4, 6 секунд
+                        logger.warning(f"YooKassa API request failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                        import time
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"YooKassa API request failed after {max_retries} attempts: {e}")
+                        raise
+                except Exception as e:
+                    # Для других ошибок не делаем retry
+                    last_exception = e
+                    raise
+            
+            # Если все попытки не удались, выбрасываем последнее исключение
+            if last_exception and 'response' not in locals():
+                raise last_exception
 
             if response.status_code != 200:
                 logger.error(f"YooKassa API error: {response.status_code}, {response.text}")

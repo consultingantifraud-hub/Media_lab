@@ -280,8 +280,8 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "model": "fal-ai/flux-2-flex",  # Flux 2 Flex модель
         "base": {
             "output_format": "png",  # PNG для лучшего качества
-            "guidance_scale": 5.0,  # Снижено для более естественного вида (было 10.0 - слишком детализировано)
-            "num_inference_steps": 28,  # Снижено для более естественного вида (было 50 - слишком детализировано)
+            "guidance_scale": 10.0,  # Как у Nano Banana Pro для максимального качества
+            "num_inference_steps": 50,  # Максимальное значение для Flux 2 Flex (API ограничивает до 50)
             "enable_prompt_expansion": True,  # По умолчанию True
             "enable_safety_checker": True,  # По умолчанию True
         },

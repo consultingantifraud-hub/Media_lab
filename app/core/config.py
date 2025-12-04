@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     fal_retoucher_model: str = "fal-ai/retoucher"
     fal_face_enhance_model: str = "fal-ai/image-editing/face-enhancement"
     fal_face_swap_model: str = "fal-ai/face-swap"
+    # Настройки для Seedream
+    fal_seedream_edit_model: str = Field(default="fal-ai/bytedance/seedream/v4.5/edit")
+    fal_seedream_create_model: str = Field(default="fal-ai/bytedance/seedream/v4.5/text-to-image")
     # Настройки для WaveSpeedAI
     wavespeed_api_key: str | None = None  # API ключ WaveSpeedAI (обязательно для WaveSpeed Face Swap - высокое качество)
     wavespeed_face_swap_model: str = "wavespeed-ai/image-face-swap"  # Модель для face swap на WaveSpeedAI

@@ -139,7 +139,7 @@ async def _send_error_notification(message: types.Message, error_context: str = 
 IMAGE_LIGHT_MODEL = settings.fal_standard_model
 IMAGE_STANDARD_MODEL = settings.fal_premium_model
 IMAGE_EDIT_MODEL = settings.fal_edit_model
-IMAGE_EDIT_ALT_MODEL = settings.fal_seedream_edit_model
+IMAGE_EDIT_ALT_MODEL = "fal-ai/bytedance/seedream/v4/edit"
 LAST_JOB_BY_CHAT: dict[int, str] = {}
 PROMPT_ACCEPTED_TEXT = (
     "Промпт принят ✅.\nТеперь выберите действие из меню."
@@ -166,7 +166,7 @@ SMART_MERGE_MODEL_KEY = "smart_merge_model"
 SMART_MERGE_SIZE_KEY = "smart_merge_size"  # Ключ для хранения выбранного размера
 SMART_MERGE_PRO_MODEL = "fal-ai/nano-banana-pro/edit"
 SMART_MERGE_DEFAULT_MODEL = "fal-ai/nano-banana/edit"
-SMART_MERGE_SEEDREAM_MODEL = settings.fal_seedream_edit_model
+SMART_MERGE_SEEDREAM_MODEL = "fal-ai/bytedance/seedream/v4/edit"
 SMART_MERGE_DEFAULT_SIZE = "1024x1024"
 SMART_MERGE_DEFAULT_ASPECT_RATIO = "1:1"
 SMART_MERGE_MAX_IMAGES = 8
@@ -191,7 +191,7 @@ RETOUCHER_MODE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "enhance": {
         "label": "Усилить черты",
-        "model": settings.fal_seedream_edit_model,  # Seedream v4.5 для улучшения черт лица
+        "model": "fal-ai/nano-banana/edit",  # Nano Banana Edit для качественной ретуши без добавления новых объектов
         "base_prompt": (
             "Улучши черты лица естественно и деликатно. "
             "Улучши четкость, гладкость и текстуру кожи. "
@@ -258,10 +258,11 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "model": settings.fal_seedream_create_model,  # Модель для создания без входного изображения
         "base": {
             "output_format": "png",
-            "guidance_scale": 12.0,  # Увеличено для максимального качества и детализации
-            "num_inference_steps": 120,  # Увеличено для максимальной детализации и качества изображения
-            "enhance_prompt_mode": "standard",  # Стандартный режим для максимального качества (вместо "fast")
-            # Seedream может иметь ограничения на разрешение, увеличиваем качество через шаги
+            "guidance_scale": 7.5,  # Оптимальное значение для естественных результатов (было 12.0 - вызывало переусиление)
+            "num_inference_steps": 60,  # Оптимальное количество шагов для баланса качества и естественности (было 120 - вызывало артефакты)
+            "enhance_prompt_mode": "fast",  # Быстрый режим для более естественной интерпретации промпта
+            "negative_prompt": "glowing eyes, unnatural colors, artifacts, distorted features, oversaturated, neon eyes, glowing effects, unrealistic lighting",  # Избегаем неестественных эффектов
+            # Оптимизировано для предотвращения артефактов (зеленые светящиеся глаза и т.д.)
         },
         "sizes": {
             # Используем максимальные размеры, которые модель может поддерживать
@@ -1513,7 +1514,7 @@ async def handle_format_choice(message: types.Message, state: FSMContext) -> Non
                 model_for_format = "fal-ai/nano-banana"
                 logger.info("handle_format_choice: detected Nano Banana edit model")
             elif model_path == SMART_MERGE_SEEDREAM_MODEL:
-                model_for_format = settings.fal_seedream_edit_model
+                model_for_format = "fal-ai/bytedance/seedream/v4/edit"
                 logger.info("handle_format_choice: detected Seedream edit model")
             else:
                 logger.warning("handle_format_choice: model_path='{}' is not supported for Smart Merge format selection", model_path)

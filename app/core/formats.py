@@ -404,6 +404,44 @@ def get_model_format_mapping(
         result["width"] = width
         result["height"] = height
         result["size"] = f"{width}x{height}"  # Также сохраняем как строку для совместимости
+    elif "flux-2-flex" in model.lower():
+        # Flux 2 Flex поддерживает image_size как enum и custom размеры через width/height
+        # Согласно документации: https://fal.ai/models/fal-ai/flux-2-flex/api
+        # square_hd - высокое разрешение (1024x1024), square - стандартное (512x512)
+        # Для высокого качества используем square_hd и custom размеры с большим разрешением
+        format_mapping = {
+            ImageFormat.SQUARE_1_1: {"image_size": "square_hd"},  # 1:1 - используем square_hd для высокого разрешения
+            ImageFormat.VERTICAL_3_4: {"width": 1024, "height": 1365},  # 3:4 - custom размеры для высокого разрешения
+            ImageFormat.HORIZONTAL_4_3: {"width": 1365, "height": 1024},  # 4:3 - custom размеры для высокого разрешения
+            ImageFormat.VERTICAL_4_5: {"width": 1024, "height": 1280},  # 4:5 - custom размеры
+            ImageFormat.VERTICAL_9_16: {"width": 1024, "height": 1820},  # 9:16 - custom размеры для высокого разрешения
+            ImageFormat.HORIZONTAL_16_9: {"width": 1820, "height": 1024},  # 16:9 - custom размеры для высокого разрешения
+        }
+        format_params = format_mapping.get(format_id, {"image_size": "square_hd"})
+        result.update(format_params)
+        result["aspect_ratio"] = spec.aspect_ratio  # Сохраняем для информации
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # elif "flux-2-pro" in model.lower():
+    #     # Flux 2 Pro Edit поддерживает width и height напрямую
+    #     # Используем оптимальные размеры для каждого формата (высокое разрешение)
+    #     format_sizes = {
+    #         ImageFormat.SQUARE_1_1: (1024, 1024),
+    #         ImageFormat.VERTICAL_3_4: (768, 1024),
+    #         ImageFormat.HORIZONTAL_4_3: (1024, 768),
+    #         ImageFormat.VERTICAL_4_5: (1024, 1280),
+    #         ImageFormat.VERTICAL_9_16: (1024, 1792),
+    #         ImageFormat.HORIZONTAL_16_9: (1792, 1024),
+    #     }
+    #     width, height = format_sizes.get(format_id, (1024, 1024))
+    #     result.update({
+    #         "width": width,
+    #         "height": height,
+    #         "size": f"{width}x{height}",
+    #     })
+    #     # Логируем для отладки
+    #     from loguru import logger
+    #     logger.info("get_model_format_mapping: Flux 2 Pro detected! model='{}', format_id='{}', returning width={}, height={}", 
+    #                model, format_id.value, width, height)
     else:
         # Для остальных моделей используем aspect_ratio по умолчанию
         result["aspect_ratio"] = spec.aspect_ratio

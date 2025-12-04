@@ -355,6 +355,47 @@ def _build_input_payload(prompt: str, options: Dict[str, Any]) -> Dict[str, Any]
         # Удаляем size и aspect_ratio, если они есть, так как Seedream использует image_size
         options.pop("size", None)
         options.pop("aspect_ratio", None)
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # # Для Flux 2 Pro Edit используем width и height напрямую
+    # elif model and "flux-2-pro" in model.lower() and "/edit" in model.lower():
+    #     # Flux 2 Pro Edit принимает width и height напрямую
+    #     logger.info("_build_input_payload: Flux 2 Pro Edit detected! model='{}', options keys: {}, width={}, height={}", 
+    #                model, list(options.keys()), options.get("width"), options.get("height"))
+    #     if "width" in options and "height" in options:
+    #         width = options.pop("width")
+    #         height = options.pop("height")
+    #         payload["width"] = width
+    #         payload["height"] = height
+    #         logger.info("_build_input_payload: Flux 2 Pro Edit - SUCCESSFULLY set width={}, height={} in payload", width, height)
+    #     else:
+    #         logger.error("_build_input_payload: Flux 2 Pro Edit detected but width/height not found! Available keys: {}, options={}", 
+    #                     list(options.keys()), options)
+    #     # Удаляем size и aspect_ratio, если они есть
+    #     options.pop("size", None)
+    #     options.pop("aspect_ratio", None)
+    #     logger.info("_build_input_payload: Flux 2 Pro Edit - FINAL payload keys: {}, width={}, height={}", 
+    #                list(payload.keys()), payload.get("width"), payload.get("height"))
+    # Для Flux 2 Flex используем image_size как enum (portrait_4_3, square, landscape_4_3 и т.д.)
+    # или custom размеры через width/height для формата 4:5
+    elif model and "flux-2-flex" in model.lower():
+        # Flux 2 Flex принимает image_size как enum согласно документации: https://fal.ai/models/fal-ai/flux-2-flex/api
+        # Для формата 4:5 используем custom размеры через width/height
+        if "width" in options and "height" in options:
+            # Custom размеры для формата 4:5
+            width = options.pop("width")
+            height = options.pop("height")
+            payload["image_size"] = {
+                "width": width,
+                "height": height
+            }
+            logger.info("_build_input_payload: Flux 2 Flex detected, setting custom image_size={{width: {}, height: {}}}", width, height)
+        elif "image_size" in options:
+            # Enum значение (square, portrait_4_3, landscape_4_3, portrait_16_9, landscape_16_9)
+            payload["image_size"] = options.pop("image_size")
+            logger.info("_build_input_payload: Flux 2 Flex detected, setting image_size={}", payload["image_size"])
+        # Удаляем size и aspect_ratio, если они есть, так как Flux 2 Flex использует image_size
+        options.pop("size", None)
+        options.pop("aspect_ratio", None)
     elif "width" in options and "height" in options:
         # Если есть width и height, используем их напрямую (приоритет над size)
         payload["width"] = options.pop("width")
@@ -538,6 +579,11 @@ def submit_image_edit(image_path: str, prompt: str, mask_path: str | None = None
     # Для Seedream добавляем image_urls
     if model == SEEDREAM_MODEL:
         input_payload.setdefault("image_urls", [encoded_image])
+    
+    # Для Flux 2 Pro Edit добавляем image_urls (поддерживает multi-reference editing до 9 изображений)
+    if "flux-2-pro" in model.lower() and "/edit" in model.lower():
+        input_payload.setdefault("image_urls", [encoded_image])
+        logger.info("submit_image_edit: Flux 2 Pro Edit detected, using image_urls for multi-reference editing")
     
     # Для Chrono Edit добавляем только размеры изображения (без image_urls)
     if model == CHRONO_EDIT_MODEL:
@@ -936,17 +982,34 @@ def run_smart_merge(
     preset = payload_opts.pop("preset", None)
     model_alias = payload_opts.pop("model", None) or SMART_MERGE_DEFAULT_MODEL
     model = get_image_model(model_alias, preset=preset)
-
-    # Если есть width и height, не устанавливаем size по умолчанию
-    # (width и height имеют приоритет в _build_input_payload)
+    
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # # КРИТИЧЕСКИ ВАЖНО: Для Flux 2 Pro Edit не устанавливаем дефолтные size и aspect_ratio
+    # # если есть width и height (width и height имеют приоритет в _build_input_payload)
+    # is_flux2pro = "flux-2-pro" in model.lower() and "/edit" in model.lower()
+    # logger.info("run_smart_merge: model='{}', is_flux2pro={}, payload_opts keys: {}, width={}, height={}", 
+    #            model, is_flux2pro, list(payload_opts.keys()), payload_opts.get("width"), payload_opts.get("height"))
+    # 
+    # if is_flux2pro:
+    #     # Для Flux 2 Pro Edit не устанавливаем дефолтные значения, если есть width и height
+    #     if "width" not in payload_opts or "height" not in payload_opts:
+    #         logger.warning("run_smart_merge: Flux 2 Pro Edit detected but width/height not in payload_opts! Available keys: {}", list(payload_opts.keys()))
+    # else:
+    # Для всех моделей устанавливаем дефолтные значения, если нет width и height
     if "width" not in payload_opts or "height" not in payload_opts:
         payload_opts.setdefault("size", SMART_MERGE_DEFAULT_SIZE)
         payload_opts.setdefault("aspect_ratio", SMART_MERGE_DEFAULT_ASPECT_RATIO)
 
     # Добавляем модель в payload_opts перед вызовом _build_input_payload, чтобы она была доступна для проверки
     payload_opts["model"] = model
+    logger.info("run_smart_merge: BEFORE _build_input_payload - payload_opts keys: {}, width={}, height={}, model={}", 
+               list(payload_opts.keys()), payload_opts.get("width"), payload_opts.get("height"), model)
     input_payload = _build_input_payload(prompt, payload_opts)
+    logger.info("run_smart_merge: AFTER _build_input_payload - input_payload keys: {}, width={}, height={}", 
+               list(input_payload.keys()), input_payload.get("width"), input_payload.get("height"))
     input_payload = apply_model_defaults(model, input_payload)
+    logger.info("run_smart_merge: AFTER apply_model_defaults - input_payload keys: {}, width={}, height={}", 
+               list(input_payload.keys()), input_payload.get("width"), input_payload.get("height"))
 
     final_urls: list[str] = []
     for source in (image_sources or [])[:SMART_MERGE_MAX_IMAGES]:
@@ -961,6 +1024,23 @@ def run_smart_merge(
     if not final_urls:
         raise ValueError("Smart merge requires at least one valid image url or path")
 
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # # Для Flux 2 Pro Edit используем image_urls для multi-reference editing (до 6 референсов)
+    # # Для других моделей также используем image_urls, но с image_url как основной
+    # if "flux-2-pro" in model.lower() and "/edit" in model.lower():
+    #     # Flux 2 Pro Edit поддерживает multi-reference через image_urls (до 6 изображений)
+    #     input_payload["image_urls"] = final_urls[:6]  # Ограничиваем до 6 референсов для Flux 2 Pro
+    #     # Не устанавливаем image_url отдельно - используем только image_urls для multi-reference
+    #     # Добавляем параметр strength для улучшения сходства с референсом (если не задан)
+    #     # Максимальное значение strength=1.0 для максимального сходства с референсом
+    #     if "strength" not in input_payload:
+    #         input_payload["strength"] = 1.0  # Максимальное значение для лучшего сходства с референсом
+    #     logger.info("run_smart_merge: Flux 2 Pro Edit detected! model='{}', image_urls count={} (limited to 6), prompt length={}, width={}, height={}, strength={}", 
+    #                model, len(final_urls[:6]), len(prompt), input_payload.get("width"), input_payload.get("height"), input_payload.get("strength"))
+    #     logger.debug("run_smart_merge: Flux 2 Pro Edit full payload keys: {}", list(input_payload.keys()))
+    #     logger.debug("run_smart_merge: Flux 2 Pro Edit image_urls={}", final_urls[:2] if len(final_urls) > 2 else final_urls)
+    # else:
+    # Для всех моделей используем стандартный подход
     input_payload["image_urls"] = final_urls
     input_payload.setdefault("image_url", final_urls[0])
 
@@ -1429,6 +1509,87 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
                             logger.warning("resolve_result_asset: queue_get failed for {}: {}", response_url[:100], queue_get_exc)
             except Exception as result_exc:  # noqa: BLE001
                 logger.error("resolve_result_asset: Failed to get status for {}: {}", model_type, result_exc, exc_info=True)
+        # Для Flux 2 Flex пробуем несколько способов получения результата
+        elif cached_model and "flux-2-flex" in cached_model.lower():
+            logger.info("resolve_result_asset: Using multiple methods for flux-2-flex (request_id={}, model_path={})", request_id, model_path)
+            try:
+                # Сначала пробуем queue_result (как для других моделей)
+                try:
+                    logger.info("resolve_result_asset: Trying queue_result for flux-2-flex")
+                    result_data = queue_result(model_path, request_id)
+                    logger.info("resolve_result_asset: Got result from queue_result for flux-2-flex: keys={}, full_result={}", 
+                               list(result_data.keys()) if isinstance(result_data, dict) else "not a dict",
+                               str(result_data)[:500] if isinstance(result_data, dict) else str(result_data)[:500])
+                    result_candidates.append(result_data)
+                except Exception as queue_result_exc:  # noqa: BLE001
+                    logger.warning("resolve_result_asset: queue_result failed for flux-2-flex: {}", queue_result_exc)
+                
+                # Также пробуем queue_status и queue_get
+                try:
+                    status_data = queue_status(model_path, request_id)
+                    logger.info("resolve_result_asset: Got status data for flux-2-flex: keys={}, status={}", 
+                               list(status_data.keys()) if isinstance(status_data, dict) else "not a dict",
+                               status_data.get("status") if isinstance(status_data, dict) else "N/A")
+                    
+                    # Проверяем, есть ли ошибка в статусе (например, content policy violation)
+                    if isinstance(status_data, dict):
+                        error_info = status_data.get("error")
+                        if error_info:
+                            logger.warning("resolve_result_asset: Flux 2 Flex request has error in status: {}", error_info)
+                            # Если есть ошибка, пробуем извлечь информацию об ошибке
+                            if isinstance(error_info, dict) and error_info.get("type") == "content_policy_violation":
+                                raise RuntimeError(f"Content policy violation: {error_info.get('msg', 'Request rejected by content checker')}")
+                    
+                    # Добавляем status_data в candidates для извлечения URL
+                    result_candidates.append(status_data)
+                    
+                    # Извлекаем response_url из статуса и пробуем получить результат
+                    response_url = status_data.get("response_url")
+                    if response_url and response_url.startswith("http"):
+                        logger.info("resolve_result_asset: Trying queue_get for flux-2-flex response_url: {}", response_url[:100])
+                        try:
+                            # Импортируем queue_get здесь, чтобы избежать ошибки импорта
+                            from app.providers.fal.client import queue_get as get_queue_result
+                            result_data = get_queue_result(response_url)
+                            logger.info("resolve_result_asset: Got result from queue_get for flux-2-flex: keys={}, full_result={}", 
+                                       list(result_data.keys()) if isinstance(result_data, dict) else "not a dict",
+                                       str(result_data)[:500] if isinstance(result_data, dict) else str(result_data)[:500])
+                            # Добавляем result_data в candidates для извлечения URL
+                            result_candidates.append(result_data)
+                            
+                            # Дополнительно проверяем, есть ли image URL напрямую в result_data
+                            if isinstance(result_data, dict):
+                                # Проверяем все возможные поля для image URL
+                                for key in ["image", "images", "output", "result", "data", "image_url", "url"]:
+                                    value = result_data.get(key)
+                                    if value:
+                                        logger.info("resolve_result_asset: Found field '{}' in result_data: type={}, value_preview={}", 
+                                                   key, type(value).__name__, str(value)[:200] if isinstance(value, (str, dict, list)) else value)
+                        except Exception as queue_get_exc:  # noqa: BLE001
+                            # Проверяем, не является ли это ошибкой 422 (content policy violation)
+                            error_str = str(queue_get_exc)
+                            if "422" in error_str or "content_policy_violation" in error_str.lower() or "content checker" in error_str.lower():
+                                logger.error("resolve_result_asset: Flux 2 Flex request rejected by content policy. This means the image was not generated.")
+                                raise RuntimeError("Content policy violation: Request was rejected by Fal.ai content checker")
+                            logger.warning("resolve_result_asset: queue_get failed for flux-2-flex response_url: {}", queue_get_exc, exc_info=True)
+                except Exception as status_exc:  # noqa: BLE001
+                    logger.warning("resolve_result_asset: queue_status failed for flux-2-flex: {}", status_exc)
+                    # Если это RuntimeError о content policy violation, пробрасываем его дальше
+                    if isinstance(status_exc, RuntimeError) and "content policy" in str(status_exc).lower():
+                        raise
+                
+                # Также проверяем raw_result из кэша
+                raw_result = cache_entry.get("raw_result")
+                if raw_result:
+                    logger.info("resolve_result_asset: Adding raw_result to candidates for flux-2-flex: keys={}, full_raw_result={}", 
+                               list(raw_result.keys()) if isinstance(raw_result, dict) else "not a dict",
+                               str(raw_result)[:500] if isinstance(raw_result, dict) else str(raw_result)[:500])
+                    result_candidates.append(raw_result)
+            except Exception as result_exc:  # noqa: BLE001
+                logger.error("resolve_result_asset: Failed to get result for flux-2-flex: {}", result_exc, exc_info=True)
+                # Если это RuntimeError о content policy violation, пробрасываем его дальше
+                if isinstance(result_exc, RuntimeError) and "content policy" in str(result_exc).lower():
+                    raise
         else:
             # Для других моделей используем queue_result
             attempts = 0
@@ -1528,7 +1689,10 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
         for idx, candidate in enumerate(result_candidates):
             candidate_type = type(candidate).__name__
             candidate_keys = list(candidate.keys()) if isinstance(candidate, dict) else "not a dict"
-            logger.debug("resolve_result_asset: Checking candidate {}: type={}, keys={}", idx + 1, candidate_type, candidate_keys)
+            logger.info("resolve_result_asset: Checking candidate {}: type={}, keys={}", idx + 1, candidate_type, candidate_keys)
+            # Для Flux 2 Flex добавляем детальное логирование
+            if cached_model and "flux-2-flex" in cached_model.lower():
+                logger.info("resolve_result_asset: Flux 2 Flex candidate {} full content: {}", idx + 1, str(candidate)[:1000] if isinstance(candidate, dict) else str(candidate)[:1000])
             image_url = _extract_image_url(candidate or {})
             if image_url:
                 result = candidate
@@ -1536,7 +1700,8 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
                            idx + 1, image_url[:100] if len(image_url) > 100 else image_url, len(image_url))
                 break
             else:
-                logger.debug("resolve_result_asset: No image URL found in candidate {}", idx + 1)
+                logger.warning("resolve_result_asset: No image URL found in candidate {} (type={}, keys={})", 
+                             idx + 1, candidate_type, candidate_keys)
 
         # Если не удалось извлечь URL из результата, попробуем использовать response_url напрямую
         # НО: для nano-banana/edit мы уже обработали его в блоке выше (строки 1316-1374)

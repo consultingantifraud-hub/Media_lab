@@ -1,0 +1,15 @@
+# Additional requirements for billing system
+
+# Database
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+
+# PostgreSQL driver (if using PostgreSQL)
+# psycopg2-binary>=2.9.9
+
+# HTTP client (already in requirements.txt, but ensure version)
+httpx>=0.27.0
+
+
+
+

@@ -53,7 +53,8 @@ def enqueue_smart_merge(prompt: str, image_sources: list[dict[str, str | None]],
     output_path = storage.base_dir / "edits" / filename
 
     queue = get_image_queue()
-    logger.info("Enqueue smart merge job {} ({})", job_id, prompt)
+    logger.info("Enqueue smart merge job {} ({}), opts keys: {}, width={}, height={}, model={}", 
+               job_id, prompt, list(opts.keys()), opts.get("width"), opts.get("height"), opts.get("model"))
     queue.enqueue(
         "app.workers.image_worker_server.process_smart_merge_job",
         kwargs={

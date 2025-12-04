@@ -5,6 +5,7 @@ from loguru import logger
 
 # Base prices from environment or defaults
 PRICE_NANO_BANANA_PRO = float(os.getenv("PRICE_NANO_BANANA_PRO", "26"))
+PRICE_FLUX2FLEX = float(os.getenv("PRICE_FLUX2FLEX", "12"))  # Цена для Flux 2 Flex
 PRICE_OTHER_MODELS = float(os.getenv("PRICE_OTHER_MODELS", "9"))
 PRICE_SEEDREAM = float(os.getenv("PRICE_SEEDREAM", "7.5"))  # Цена для Seedream в операциях generate и edit
 PRICE_PROMPT_GENERATION = float(os.getenv("PRICE_PROMPT_GENERATION", "3"))
@@ -14,6 +15,7 @@ PRICE_ADD_TEXT = float(os.getenv("PRICE_ADD_TEXT", "1"))
 # Operation type to price mapping
 OPERATION_PRICES: Dict[str, float] = {
     "generate_nano_banana_pro": PRICE_NANO_BANANA_PRO,
+    "generate_flux2flex": PRICE_FLUX2FLEX,
     "generate_other": PRICE_OTHER_MODELS,
     "prompt_generation": PRICE_PROMPT_GENERATION,
     "face_swap": PRICE_FACE_SWAP,
@@ -72,10 +74,15 @@ def get_operation_price(
     # Check if it's Seedream model (only for generate and edit, not retouch)
     is_seedream = _is_seedream_model(model)
     
+    # Check if it's Flux 2 Flex model
+    is_flux2flex = _is_flux2flex_model(model)
+    
     # Check if it's Nano Banana Pro generation or merge
     if operation_type == "generate":
         if is_nano_banana_pro or (model and _is_nano_banana_pro_model(model)):
             return OPERATION_PRICES["generate_nano_banana_pro"]
+        if is_flux2flex:
+            return PRICE_FLUX2FLEX  # 12 рублей для Flux 2 Flex
         if is_seedream:
             return PRICE_SEEDREAM  # 7.5 рублей для Seedream
         return OPERATION_PRICES["generate_other"]
@@ -115,9 +122,10 @@ def get_operation_description(operation_type: str) -> str:
 
 
 def get_all_prices() -> Dict[str, float]:
-    """Get all operation prices for display."""
-    return {
+    """Get all operation prices for display, sorted by price in descending order."""
+    prices = {
         "Nano Banana Pro (генерация/объединение)": PRICE_NANO_BANANA_PRO,
+        "Flux 2 Flex (генерация)": PRICE_FLUX2FLEX,
         "Seedream (генерация/редактирование)": PRICE_SEEDREAM,
         "Nano Banana (генерация/редактирование)": PRICE_OTHER_MODELS,
         "Остальные модели (генерация/редактирование/объединение/ретушь/upscale)": PRICE_OTHER_MODELS,
@@ -125,6 +133,8 @@ def get_all_prices() -> Dict[str, float]:
         "Замена лица": PRICE_FACE_SWAP,
         "Добавление текста": PRICE_ADD_TEXT,
     }
+    # Сортируем по убыванию цены
+    return dict(sorted(prices.items(), key=lambda x: x[1], reverse=True))
 
 
 def _is_nano_banana_pro_model(model: str) -> bool:
@@ -154,6 +164,20 @@ def _is_seedream_model(model: Optional[str]) -> bool:
         model == "fal-ai/bytedance/seedream/v4/text-to-image" or
         model == "fal-ai/bytedance/seedream/v4/edit" or
         model == "seedream-create"
+    )
+
+
+def _is_flux2flex_model(model: Optional[str]) -> bool:
+    """Check if model is Flux 2 Flex."""
+    if not model:
+        return False
+    
+    model_lower = model.lower()
+    return (
+        "flux-2-flex" in model_lower or
+        "flux2flex" in model_lower or
+        model == "fal-ai/flux-2-flex" or
+        model == "flux2flex-create"
     )
 
 

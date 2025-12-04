@@ -1,4 +1,5 @@
 """Billing handlers for Telegram bot."""
+import asyncio
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -192,7 +193,10 @@ async def show_balance(message: Message, state: FSMContext = None):
     
     db = SessionLocal()
     try:
-        # Check for pending payments and update if needed
+        # Check for pending payments and update if needed (async, non-blocking)
+        # ВАЖНО: Не блокируем обработку баланса проверкой платежей
+        # Проверка платежей может занимать до 60+ секунд из-за timeout и retry
+        # Выполняем проверку в фоне через asyncio.create_task
         from app.services.payment import PaymentService
         from app.db.models import Payment, PaymentStatus, User
         user_obj = db.query(User).filter(User.telegram_id == message.from_user.id).first()
@@ -202,15 +206,30 @@ async def show_balance(message: Message, state: FSMContext = None):
                 Payment.status == PaymentStatus.PENDING
             ).order_by(Payment.created_at.desc()).limit(1).all()
             
-            for payment in pending_payments:
-                if payment.yookassa_payment_id:
-                    # Check status from YooKassa (silently, don't show errors to user)
+            # Запускаем проверку платежей в фоне, не блокируя ответ пользователю
+            if pending_payments:
+                async def check_payments_background():
+                    """Check payment status in background without blocking."""
+                    db_bg = SessionLocal()
                     try:
-                        PaymentService.check_payment_status_from_yookassa(
-                            db, payment.yookassa_payment_id
-                        )
-                    except Exception as e:
-                        logger.debug(f"Error checking payment status: {e}")
+                        for payment in pending_payments:
+                            if payment.yookassa_payment_id:
+                                # Check status from YooKassa (silently, don't show errors to user)
+                                try:
+                                    # Используем run_in_executor для синхронной функции
+                                    loop = asyncio.get_event_loop()
+                                    await loop.run_in_executor(
+                                        None,
+                                        PaymentService.check_payment_status_from_yookassa,
+                                        db_bg, payment.yookassa_payment_id
+                                    )
+                                except Exception as e:
+                                    logger.debug(f"Error checking payment status in background: {e}")
+                    finally:
+                        db_bg.close()
+                
+                # Запускаем проверку в фоне, не ждем результата
+                asyncio.create_task(check_payments_background())
         
         user_info = BillingService.get_user_info(db, message.from_user.id)
         if not user_info:
@@ -235,8 +254,40 @@ async def show_balance(message: Message, state: FSMContext = None):
                     f"💰 **Скидка на операции:** {user.operation_discount_percent}%"
                 )
 
-        # Get prices for display
+        # Get prices for display (already sorted by price in descending order)
         prices = get_all_prices()
+        
+        # Отладочное логирование для проверки Flux 2 Flex
+        logger.debug(f"show_balance: All prices keys: {list(prices.keys())}")
+        logger.debug(f"show_balance: Flux 2 Flex in prices: {'Flux 2 Flex (генерация)' in prices}")
+        if "Flux 2 Flex (генерация)" in prices:
+            logger.debug(f"show_balance: Flux 2 Flex price: {prices['Flux 2 Flex (генерация)']}")
+        
+        # Формируем список услуг с ценами (уже отсортирован по убыванию)
+        services_list = []
+        for service_name, price in prices.items():
+            # Упрощаем названия для отображения
+            if service_name == "Nano Banana Pro (генерация/объединение)":
+                services_list.append(f"• Nano Banana Pro: {price} ₽")
+            elif service_name == "Flux 2 Flex (генерация)":
+                services_list.append(f"• Flux 2 Flex: {price} ₽")
+            elif service_name == "Seedream (генерация/редактирование)":
+                services_list.append(f"• Seedream: {price} ₽")
+            elif service_name == "Nano Banana (генерация/редактирование)":
+                services_list.append(f"• Nano Banana: {price} ₽")
+            elif service_name == "Остальные модели (генерация/редактирование/объединение/ретушь/upscale)":
+                services_list.append(f"• Ретушь, Улучшить: {price} ₽")
+            elif service_name == "Генерация промпта":
+                services_list.append(f"• Генерация промпта: {price} ₽")
+            elif service_name == "Замена лица":
+                services_list.append(f"• Замена лица: {price} ₽")
+            elif service_name == "Добавление текста":
+                services_list.append(f"• Добавление текста: {price} ₽")
+            else:
+                # Добавляем все остальные услуги, которые не были обработаны
+                services_list.append(f"• {service_name}: {price} ₽")
+        
+        services_text = "\n".join(services_list)
         
         if has_free_access:
             text = (
@@ -244,13 +295,7 @@ async def show_balance(message: Message, state: FSMContext = None):
                 f"✨ **Бесплатный доступ:** Активен\n"
                 f"💡 Вы можете пользоваться сервисом бесплатно без ограничений\n\n"
                 f"📋 **Базовая стоимость услуг (без скидки):**\n"
-                f"• Nano Banana Pro: {prices['Nano Banana Pro (генерация/объединение)']} ₽\n"
-                f"• Seedream: {prices['Seedream (генерация/редактирование)']} ₽\n"
-                f"• Nano Banana: {prices['Nano Banana (генерация/редактирование)']} ₽\n"
-                f"• Остальные модели: {prices['Остальные модели (генерация/редактирование/объединение/ретушь/upscale)']} ₽\n"
-                f"• Генерация промпта: {prices['Генерация промпта']} ₽\n"
-                f"• Замена лица: {prices['Замена лица']} ₽\n"
-                f"• Добавление текста: {prices['Добавление текста']} ₽"
+                f"{services_text}"
                 f"{discount_info}"
             )
         else:
@@ -258,13 +303,7 @@ async def show_balance(message: Message, state: FSMContext = None):
                 f"💰 **Ваш баланс:** {format_balance(balance)} ₽"
                 f"{discount_info}\n\n"
                 f"📋 **Базовая стоимость услуг (без скидки):**\n"
-                f"• Nano Banana Pro: {prices['Nano Banana Pro (генерация/объединение)']} ₽\n"
-                f"• Seedream: {prices['Seedream (генерация/редактирование)']} ₽\n"
-                f"• Nano Banana: {prices['Nano Banana (генерация/редактирование)']} ₽\n"
-                f"• Остальные модели: {prices['Остальные модели (генерация/редактирование/объединение/ретушь/upscale)']} ₽\n"
-                f"• Генерация промпта: {prices['Генерация промпта']} ₽\n"
-                f"• Замена лица: {prices['Замена лица']} ₽\n"
-                f"• Добавление текста: {prices['Добавление текста']} ₽"
+                f"{services_text}"
             )
 
         await message.answer(
@@ -448,19 +487,39 @@ async def callback_payment_menu(callback: CallbackQuery, state: FSMContext):
 
         prices = get_all_prices()
         
+        # Формируем список услуг с ценами (уже отсортирован по убыванию)
+        services_list = []
+        for service_name, price in prices.items():
+            # Упрощаем названия для отображения
+            if service_name == "Nano Banana Pro (генерация/объединение)":
+                services_list.append(f"• Nano Banana Pro: {price} ₽")
+            elif service_name == "Flux 2 Flex (генерация)":
+                services_list.append(f"• Flux 2 Flex: {price} ₽")
+            elif service_name == "Seedream (генерация/редактирование)":
+                services_list.append(f"• Seedream: {price} ₽")
+            elif service_name == "Nano Banana (генерация/редактирование)":
+                services_list.append(f"• Nano Banana: {price} ₽")
+            elif service_name == "Остальные модели (генерация/редактирование/объединение/ретушь/upscale)":
+                services_list.append(f"• Ретушь, Улучшить: {price} ₽")
+            elif service_name == "Генерация промпта":
+                services_list.append(f"• Генерация промпта: {price} ₽")
+            elif service_name == "Замена лица":
+                services_list.append(f"• Замена лица: {price} ₽")
+            elif service_name == "Добавление текста":
+                services_list.append(f"• Добавление текста: {price} ₽")
+            else:
+                # Добавляем все остальные услуги, которые не были обработаны
+                services_list.append(f"• {service_name}: {price} ₽")
+        
+        services_text = "\n".join(services_list)
+        
         if has_free_access:
             text = (
                 f"💰 **Ваш баланс:** {balance} ₽\n"
                 f"✨ **Бесплатный доступ:** Активен"
                 f"{discount_info}\n\n"
                 f"📋 **Базовая стоимость услуг (без скидки):**\n"
-                f"• Nano Banana Pro: {prices['Nano Banana Pro (генерация/объединение)']} ₽\n"
-                f"• Seedream: {prices['Seedream (генерация/редактирование)']} ₽\n"
-                f"• Nano Banana: {prices['Nano Banana (генерация/редактирование)']} ₽\n"
-                f"• Остальные модели: {prices['Остальные модели (генерация/редактирование/объединение/ретушь/upscale)']} ₽\n"
-                f"• Генерация промпта: {prices['Генерация промпта']} ₽\n"
-                f"• Замена лица: {prices['Замена лица']} ₽\n"
-                f"• Добавление текста: {prices['Добавление текста']} ₽\n\n"
+                f"{services_text}\n\n"
                 f"Выберите сумму для пополнения (опционально):"
             )
         else:
@@ -468,13 +527,7 @@ async def callback_payment_menu(callback: CallbackQuery, state: FSMContext):
                 f"💰 **Ваш баланс:** {format_balance(balance)} ₽"
                 f"{discount_info}\n\n"
                 f"📋 **Базовая стоимость услуг (без скидки):**\n"
-                f"• Nano Banana Pro: {prices['Nano Banana Pro (генерация/объединение)']} ₽\n"
-                f"• Seedream: {prices['Seedream (генерация/редактирование)']} ₽\n"
-                f"• Nano Banana: {prices['Nano Banana (генерация/редактирование)']} ₽\n"
-                f"• Остальные модели: {prices['Остальные модели (генерация/редактирование/объединение/ретушь/upscale)']} ₽\n"
-                f"• Генерация промпта: {prices['Генерация промпта']} ₽\n"
-                f"• Замена лица: {prices['Замена лица']} ₽\n"
-                f"• Добавление текста: {prices['Добавление текста']} ₽\n\n"
+                f"{services_text}\n\n"
                 f"Выберите сумму для пополнения:"
             )
 
@@ -521,16 +574,29 @@ async def callback_payment_amount(callback: CallbackQuery, state: FSMContext):
             await callback.answer()
             return
         
-        payment_result = PaymentService.create_payment(
-            db,
-            user.id,
-            amount,
-            f"Пополнение баланса на {amount}₽",
-            user.email
-        )
+        # Создаем платеж асинхронно, чтобы не блокировать ответ пользователю
+        await callback.answer("⏳ Создаю платеж...")
+        
+        import asyncio
+        loop = asyncio.get_event_loop()
+        
+        try:
+            payment_result = await loop.run_in_executor(
+                None,
+                PaymentService.create_payment,
+                db,
+                user.id,
+                amount,
+                f"Пополнение баланса на {amount}₽",
+                user.email
+            )
+        except Exception as e:
+            logger.error(f"Error creating payment in background: {e}", exc_info=True)
+            await callback.answer("❌ Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
+            return
 
         if not payment_result:
-            await callback.answer("Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
+            await callback.answer("❌ Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
             return
 
         confirmation_url = payment_result["confirmation_url"]
@@ -645,27 +711,59 @@ async def process_custom_amount(message: Message, state: FSMContext):
                     discount_amount = int(amount * discount_percent / 100)
                     final_amount = amount - discount_amount
             
-            payment_result = PaymentService.create_payment(
-                db,
-                user.id,
-                final_amount,
-                f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
-                user.email
-            )
+            # Создаем платеж асинхронно, чтобы не блокировать ответ пользователю
+            # PaymentService.create_payment может занимать до 60+ секунд из-за timeout и retry
+            import asyncio
+            loop = asyncio.get_event_loop()
+            
+            # Показываем пользователю, что платеж обрабатывается
+            processing_msg = await message.answer("⏳ Создаю платеж...")
+            
+            try:
+                payment_result = await loop.run_in_executor(
+                    None,
+                    PaymentService.create_payment,
+                    db,
+                    user.id,
+                    final_amount,
+                    f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
+                    user.email
+                )
+            except Exception as e:
+                logger.error(f"Error creating payment in background: {e}", exc_info=True)
+                await processing_msg.delete()
+                await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
+                return
+            
+            # Удаляем сообщение "Создаю платеж..."
+            try:
+                await processing_msg.delete()
+            except Exception as del_err:
+                logger.warning(f"Failed to delete processing message: {del_err}")
 
             if not payment_result:
-                await message.answer("Ошибка при создании платежа. Попробуйте позже.")
+                logger.error(f"Payment creation returned None for user_id={user.id}, amount={amount}₽")
+                await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
                 return
+
+            logger.info(f"Payment created successfully: payment_id={payment_result.get('payment_id')}, confirmation_url={payment_result.get('confirmation_url', 'N/A')[:50]}...")
 
             # Apply discount to payment if code was used
             if discount_code:
-                is_valid, discount, _ = DiscountService.validate_discount_code(db, discount_code, user.id)
-                if is_valid and not discount.is_free_generation:
-                    payment_id = payment_result["payment_id"]
-                    DiscountService.apply_discount_to_payment(db, discount, user.id, payment_id)
-                    await state.update_data(discount_code=None)  # Clear discount code after use
+                try:
+                    is_valid, discount, _ = DiscountService.validate_discount_code(db, discount_code, user.id)
+                    if is_valid and not discount.is_free_generation:
+                        payment_id = payment_result["payment_id"]
+                        DiscountService.apply_discount_to_payment(db, discount, user.id, payment_id)
+                        await state.update_data(discount_code=None)  # Clear discount code after use
+                except Exception as discount_err:
+                    logger.error(f"Error applying discount: {discount_err}", exc_info=True)
 
-            confirmation_url = payment_result["confirmation_url"]
+            confirmation_url = payment_result.get("confirmation_url")
+            if not confirmation_url:
+                logger.error(f"No confirmation_url in payment_result: {payment_result}")
+                await message.answer("❌ Ошибка: не получена ссылка на оплату. Попробуйте позже.")
+                return
             
             payment_text = f"💳 **Платеж создан**\n\n"
             if discount_amount > 0:
@@ -693,11 +791,17 @@ async def process_custom_amount(message: Message, state: FSMContext):
                 ]
             ])
 
-            await message.answer(
-                payment_text,
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
+            try:
+                await message.answer(
+                    payment_text,
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+                logger.info(f"Payment message sent successfully to user_id={message.from_user.id}")
+            except Exception as send_err:
+                logger.error(f"Error sending payment message: {send_err}", exc_info=True)
+                await message.answer(f"❌ Ошибка при отправке сообщения о платеже. Ссылка: {confirmation_url}")
+            
             await state.clear()
         finally:
             db.close()
@@ -750,19 +854,43 @@ async def process_email(message: Message, state: FSMContext):
                 discount_amount = int(amount * discount_percent / 100)
                 final_amount = amount - discount_amount
         
-        # Create payment with email
-        payment_result = PaymentService.create_payment(
-            db,
-            user.id,
-            final_amount,
-            f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
-            email
-        )
+        # Создаем платеж асинхронно, чтобы не блокировать ответ пользователю
+        # Показываем пользователю, что платеж обрабатывается
+        processing_msg = await message.answer("⏳ Создаю платеж...")
         
-        if not payment_result:
-            await message.answer("Ошибка при создании платежа. Попробуйте позже.")
+        import asyncio
+        loop = asyncio.get_event_loop()
+        
+        try:
+            payment_result = await loop.run_in_executor(
+                None,
+                PaymentService.create_payment,
+                db,
+                user.id,
+                final_amount,
+                f"Пополнение баланса на {amount}₽" + (f" (скидка {discount_percent}%)" if discount_amount > 0 else ""),
+                email
+            )
+        except Exception as e:
+            logger.error(f"Error creating payment in background: {e}", exc_info=True)
+            await processing_msg.delete()
+            await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
             await state.clear()
             return
+        
+        # Удаляем сообщение "Создаю платеж..."
+        try:
+            await processing_msg.delete()
+        except Exception as del_err:
+            logger.warning(f"Failed to delete processing message: {del_err}")
+        
+        if not payment_result:
+            logger.error(f"Payment creation returned None for user_id={user.id}, amount={amount}₽")
+            await message.answer("❌ Ошибка при создании платежа. Попробуйте позже.")
+            await state.clear()
+            return
+
+        logger.info(f"Payment created successfully: payment_id={payment_result.get('payment_id')}, confirmation_url={payment_result.get('confirmation_url', 'N/A')[:50]}...")
         
         # Apply discount to payment if code was used
         if discount_code:
@@ -772,7 +900,12 @@ async def process_email(message: Message, state: FSMContext):
                 DiscountService.apply_discount_to_payment(db, discount, user.id, payment_id)
                 await state.update_data(discount_code=None)
         
-        confirmation_url = payment_result["confirmation_url"]
+        confirmation_url = payment_result.get("confirmation_url")
+        if not confirmation_url:
+            logger.error(f"No confirmation_url in payment_result: {payment_result}")
+            await message.answer("❌ Ошибка: не получена ссылка на оплату. Попробуйте позже.")
+            await state.clear()
+            return
         
         payment_text = f"💳 **Платеж создан**\n\n"
         if discount_amount > 0:
@@ -802,11 +935,17 @@ async def process_email(message: Message, state: FSMContext):
             ]
         ])
         
-        await message.answer(
-            payment_text,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
+        try:
+            await message.answer(
+                payment_text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+            logger.info(f"Payment message sent successfully to user_id={message.from_user.id}")
+        except Exception as send_err:
+            logger.error(f"Error sending payment message: {send_err}", exc_info=True)
+            await message.answer(f"❌ Ошибка при отправке сообщения о платеже. Ссылка: {confirmation_url}")
+        
         await state.clear()
         
     except Exception as e:
@@ -840,10 +979,76 @@ async def callback_balance_menu(callback: CallbackQuery, state: FSMContext):
     await show_balance(callback.message, state)
 
 
+async def export_operations_to_excel(callback: CallbackQuery, days: int) -> None:
+    """Export user operations to Excel file for specified period."""
+    try:
+        import tempfile
+        import os
+        from aiogram.types import FSInputFile
+        
+        logger.info(f"Starting export_operations_to_excel for {days} days")
+        
+        # Import here to catch import errors
+        try:
+            from scripts.export_user_operations import export_user_operations_to_excel
+        except ImportError as e:
+            logger.error(f"Failed to import export_user_operations: {e}", exc_info=True)
+            await callback.message.answer("❌ Ошибка: модуль экспорта не найден.")
+            await callback.answer()
+            return
+        
+        db = SessionLocal()
+        try:
+            user, _ = BillingService.get_or_create_user(db, callback.from_user.id)
+            logger.info(f"User found: {user.id}, exporting operations for {days} days")
+            
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+                excel_file = tmp.name
+            
+            logger.info(f"Temporary file created: {excel_file}")
+            
+            try:
+                # Export operations
+                logger.info(f"Calling export_user_operations_to_excel(user_id={user.id}, days={days}, file={excel_file})")
+                result = export_user_operations_to_excel(user.id, days, excel_file)
+                
+                logger.info(f"Export result: {result}")
+                
+                if result and os.path.exists(excel_file):
+                    # Send file to user
+                    period_text = f"{days} дней" if days > 1 else f"{days} день"
+                    file = FSInputFile(excel_file, filename=f"operations_{days}days.xlsx")
+                    logger.info(f"Sending file to user: {excel_file}")
+                    await callback.message.answer_document(
+                        document=file,
+                        caption=f"📊 История операций за {period_text}\n{get_moscow_time().strftime('%d.%m.%Y %H:%M')}"
+                    )
+                    logger.info("File sent successfully")
+                else:
+                    logger.error(f"Export failed or file not created. Result: {result}, File exists: {os.path.exists(excel_file) if excel_file else False}")
+                    await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
+                    await callback.answer()
+            finally:
+                # Clean up temporary file
+                if os.path.exists(excel_file):
+                    os.unlink(excel_file)
+                    logger.info(f"Temporary file deleted: {excel_file}")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Error in export_operations_to_excel: {e}", exc_info=True)
+        try:
+            await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
+            await callback.answer()
+        except:
+            pass
+
+
 @router.callback_query(F.data == "operations_history")
 async def callback_operations_history(callback: CallbackQuery, state: FSMContext):
-    """Show operations history."""
-    await callback_operations_history_with_filter(callback, state, days=None)
+    """Show operations history (default: 1 day)."""
+    await callback_operations_history_with_filter(callback, state, days=1)
 
 
 @router.callback_query(F.data.startswith("operations_history_"))
@@ -852,19 +1057,49 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
     # Parse days from callback data if not provided
     if days is None:
         data = callback.data
-        if data == "operations_history_7":
-            days = 7
+        if data == "operations_history_1":
+            days = 1
+        elif data == "operations_history_7":
+            # Export to Excel for 7 days
+            logger.info(f"Exporting operations for 7 days for user {callback.from_user.id}")
+            try:
+                await callback.answer("📊 Формирую выгрузку за 7 дней...")
+                await export_operations_to_excel(callback, 7)
+            except Exception as e:
+                logger.error(f"Error exporting operations for 7 days: {e}", exc_info=True)
+                await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
+                await callback.answer()
+            return
         elif data == "operations_history_30":
-            days = 30
+            # Export to Excel for 30 days
+            logger.info(f"Exporting operations for 30 days for user {callback.from_user.id}")
+            try:
+                await callback.answer("📊 Формирую выгрузку за 30 дней...")
+                await export_operations_to_excel(callback, 30)
+            except Exception as e:
+                logger.error(f"Error exporting operations for 30 days: {e}", exc_info=True)
+                await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
+                await callback.answer()
+            return
         elif data == "operations_history_all":
             days = None
         else:
-            days = None
+            days = 1  # Default to 1 day
     
     db = SessionLocal()
     try:
         user, _ = BillingService.get_or_create_user(db, callback.from_user.id)
-        operations = BillingService.get_user_operations(db, user.id, limit=30, days=days)
+        # Get operations - limit to avoid MESSAGE_TOO_LONG error
+        # Telegram has a limit of 4096 characters per message
+        if days == 1:
+            # Show up to 30 operations for 1 day (to avoid message too long)
+            operations = BillingService.get_user_operations(db, user.id, limit=30, days=days)
+        elif days is None:
+            # For "all" view, limit to 20
+            operations = BillingService.get_user_operations(db, user.id, limit=20, days=days)
+        else:
+            # Should not happen (7 and 30 days are handled separately)
+            operations = BillingService.get_user_operations(db, user.id, limit=20, days=days)
         total_count = BillingService.get_operations_count(db, user.id, days=days)
         
         if not operations:
@@ -887,7 +1122,9 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
         
         # Format operations history header
         period_text = ""
-        if days == 7:
+        if days == 1:
+            period_text = " (за 1 день)"
+        elif days == 7:
             period_text = " (за 7 дней)"
         elif days == 30:
             period_text = " (за 30 дней)"
@@ -925,7 +1162,16 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
             "payment": "💰",  # Payment/deposit
         }
         
-        for op in operations[:20]:  # Show last 20 operations (compact format allows more)
+        # Limit operations to avoid MESSAGE_TOO_LONG error
+        # Show up to 30 for 1 day, 20 for "all" view
+        max_operations = 30 if days == 1 else 20
+        operations_to_show = operations[:max_operations]
+        
+        # Build message and check length, reduce if needed
+        # Telegram limit is 4096 characters, but we'll use 3500 to be safe
+        MAX_MESSAGE_LENGTH = 3500
+        
+        for op in operations_to_show:
             op_type = op["type"]
             record_type = op.get("record_type", "operation")
             
@@ -993,20 +1239,89 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
                 lines.append(f"{type_icon} {op_name} • {emoji} {price_str} • {status_label} • {date_str}")
             # PENDING operations are skipped - they haven't been charged yet
         
-        if total_count > 20:
-            lines.append(f"\n... и еще {total_count - 20} операций")
+        # Show "... и еще" message if there are more operations than displayed
+        displayed_count = len(operations_to_show)
+        if total_count > displayed_count:
+            remaining = total_count - displayed_count
+            if days == 1:
+                lines.append(f"\n... и еще {remaining} операций")
+                lines.append("💡 Для полной выгрузки используйте кнопки «7 дней (Excel)» или «30 дней (Excel)»")
+            elif days is None:
+                lines.append(f"\n... и еще {remaining} операций")
         
         text = "\n".join(lines)
+        
+        # Check message length and reduce if needed
+        MAX_MESSAGE_LENGTH = 3500
+        if len(text) > MAX_MESSAGE_LENGTH:
+            # Reduce operations until message fits
+            logger.warning(f"Message too long ({len(text)} chars), reducing operations")
+            while len(text) > MAX_MESSAGE_LENGTH and len(operations_to_show) > 5:
+                operations_to_show = operations_to_show[:-1]
+                # Rebuild lines
+                lines = [f"📊 **История операций{period_text}**\nВсего: {total_count}\n"]
+                for op in operations_to_show:
+                    op_type = op["type"]
+                    record_type = op.get("record_type", "operation")
+                    
+                    if record_type == "payment" or op_type == "payment":
+                        op_name = "Пополнение баланса"
+                        type_icon = "💰"
+                        emoji = "✅"
+                        price_rubles = op['price'] / 100.0
+                        price_str = f"{price_rubles:.2f} ₽"
+                    else:
+                        op_name = get_operation_name(op_type)
+                        type_icon = type_emoji.get(op_type, "•")
+                        status = op["status"]
+                        emoji = status_emoji.get(status, "•")
+                        price_rubles = op['price'] / 100.0
+                        original_price_kopecks = op.get("original_price")
+                        discount_percent = op.get("discount_percent")
+                        
+                        if op['price'] > 0:
+                            if original_price_kopecks and discount_percent and original_price_kopecks > op['price']:
+                                original_price_rubles = original_price_kopecks / 100.0
+                                discount_amount_rubles = (original_price_kopecks - op['price']) / 100.0
+                                price_str = f"~~{original_price_rubles:.2f}₽~~ {price_rubles:.2f}₽ 🎟️"
+                            else:
+                                price_str = f"{price_rubles:.2f}₽"
+                        else:
+                            price_str = "Бесплатно"
+                    
+                    created_at = op["created_at"]
+                    if isinstance(created_at, datetime):
+                        moscow_tz = ZoneInfo("Europe/Moscow")
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=ZoneInfo("UTC"))
+                        moscow_time = created_at.astimezone(moscow_tz)
+                        date_str = moscow_time.strftime("%d.%m %H:%M")
+                    else:
+                        date_str = str(created_at)[:11]
+                    
+                    if record_type == "payment" or op_type == "payment":
+                        lines.append(f"{type_icon} {op_name} • {emoji} +{price_str} • {date_str}")
+                    elif status == "charged" or status == "free":
+                        lines.append(f"{type_icon} {op_name} • {emoji} {price_str} • {date_str}")
+                
+                if total_count > len(operations_to_show):
+                    remaining = total_count - len(operations_to_show)
+                    lines.append(f"\n... и еще {remaining} операций")
+                    if days == 1:
+                        lines.append("💡 Для полной выгрузки используйте Excel")
+                
+                text = "\n".join(lines)
         
         # Add period filter buttons
         keyboard_rows = []
         
         # Period filter buttons
         period_buttons = []
-        if days != 7:
-            period_buttons.append(InlineKeyboardButton(text="📅 7 дней", callback_data="operations_history_7"))
-        if days != 30:
-            period_buttons.append(InlineKeyboardButton(text="📅 30 дней", callback_data="operations_history_30"))
+        if days != 1:
+            period_buttons.append(InlineKeyboardButton(text="📅 1 день", callback_data="operations_history_1"))
+        # 7 and 30 days will export to Excel
+        period_buttons.append(InlineKeyboardButton(text="📊 7 дней (Excel)", callback_data="operations_history_7"))
+        period_buttons.append(InlineKeyboardButton(text="📊 30 дней (Excel)", callback_data="operations_history_30"))
         if days is not None:
             period_buttons.append(InlineKeyboardButton(text="📅 Все", callback_data="operations_history_all"))
         
@@ -1387,6 +1702,15 @@ async def handle_text_after_balance_menu(message: Message, state: FSMContext):
                message.from_user.id if message.from_user else None,
                message.text,
                current_state)
+    
+    # Если пользователь явно пытается создать изображение (выбрал модель), не перехватываем
+    # Проверяем, есть ли в состоянии выбранная модель
+    data = await state.get_data()
+    selected_model = data.get("selected_model") or data.get("model")
+    if selected_model:
+        # Пользователь уже выбрал модель, значит он создает изображение - не перехватываем
+        logger.info("handle_text_after_balance_menu: user has selected model '{}', skipping interception", selected_model)
+        return
     
     if current_state == PaymentStates.BALANCE_MENU_SHOWN:
         # User entered text after seeing balance menu

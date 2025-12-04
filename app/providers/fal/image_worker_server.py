@@ -923,9 +923,40 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
     logger.info("Image job {}: operation_id_raw from options: {} (type: {})", 
                job_id, operation_id_raw, type(operation_id_raw).__name__ if operation_id_raw is not None else "None")
     operation_id = _parse_operation_id(operation_id_raw, job_id, "Image")
-    provider_prompt = provider_options.pop("provider_prompt", prompt)
     output_file = Path(output_path)
     job = get_current_job()
+    
+    # КРИТИЧЕСКИ ВАЖНО: Проверяем модель ПЕРЕД извлечением provider_prompt, чтобы сразу установить правильный промпт
+    # Используем тот же подход, что и для Nano Banana
+    # ПРОВЕРКА ДОЛЖНА БЫТЬ ПЕРВОЙ, ДО ЛЮБЫХ ДРУГИХ ОПЕРАЦИЙ С ПРОМПТОМ!
+    model_name = provider_options.get("model", "")
+    selected_model = provider_options.get("selected_model", "")
+    
+    # ПРИНУДИТЕЛЬНАЯ ПРОВЕРКА: логируем ВСЕ параметры для отладки
+    logger.critical("🚨🚨🚨 FLUX2FLEX DEBUG: Image job {} - model_name='{}', selected_model='{}', options_keys={}", 
+                    job_id, model_name, selected_model, list(provider_options.keys())[:10])
+    
+    is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
+    is_flux2flex = "flux-2-flex" in model_name.lower() or selected_model == "flux2flex-create"
+    is_gpt_create = selected_model == "gpt-create"
+    
+    logger.critical("🚨🚨🚨 FLUX2FLEX DEBUG: Image job {} - is_nano_banana={}, is_flux2flex={}, is_gpt_create={}", 
+                    job_id, is_nano_banana, is_flux2flex, is_gpt_create)
+    
+    # Для Nano Banana, Flux 2 Flex и gpt-create используем оригинальный русский промпт БЕЗ перевода
+    if is_nano_banana or is_flux2flex or is_gpt_create:
+        provider_prompt = prompt  # Используем оригинальный русский промпт
+        if is_nano_banana:
+            logger.info("✅ Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
+        elif is_flux2flex:
+            logger.info("✅ Image job {}: Flux 2 Flex model detected, using original Russian prompt without translation", job_id)
+        elif is_gpt_create:
+            logger.info("✅ Image job {}: Nano Banana Pro (gpt-create) detected, using original Russian prompt without translation", job_id)
+    else:
+        # Для других моделей извлекаем provider_prompt из options (может быть переведен в боте)
+        logger.info("⚠️ Image job {}: Not a Russian-compatible model, extracting provider_prompt from options", job_id)
+        provider_prompt = provider_options.pop("provider_prompt", prompt)
+    
     if job:
         job.meta.update({"prompt": prompt})
         if prompt != provider_prompt:
@@ -939,51 +970,44 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
         logger.info("Image job {}: provider_prompt='{}' (same as prompt: {})", 
                     job_id, provider_prompt[:100] if provider_prompt else "None", provider_prompt == prompt)
 
-        # Проверяем, является ли модель Nano Banana Pro (gpt-create - внутренний ключ для UI)
-        selected_model = provider_options.get("selected_model", "")
-        is_gpt_create = selected_model == "gpt-create"
-
+        # Обработка gpt-create (Nano Banana Pro)
         if is_gpt_create:
             # Используем Nano Banana Pro через Fal.ai для лучшего качества кириллицы
             logger.info("Image job {} using Nano Banana Pro (Fal.ai) for text-to-image generation", job_id)
-
-            # Nano Banana Pro поддерживает кириллицу напрямую, не нужно переводить
-            # Используем оригинальный промпт
-            provider_prompt = prompt
-
             # Устанавливаем модель Nano Banana Pro (уже должна быть установлена, но на всякий случай)
             provider_options["model"] = "fal-ai/nano-banana-pro"
             provider_options["selected_model"] = None  # Убираем gpt-create, чтобы использовать обычную логику
-
             logger.info("Image job {}: Using Nano Banana Pro with original Russian prompt: '{}'", job_id, prompt[:50])
 
-        # Проверяем, является ли модель Nano-banana (может принимать русский текст)
-        model_name = provider_options.get("model", "")
-        is_nano_banana = model_name == "fal-ai/nano-banana" or model_name == "fal-ai/nano-banana-pro" or "nano-banana" in model_name.lower()
-
-        if provider_prompt != prompt:
-            logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
-        elif is_nano_banana:
-            # Для Nano-banana не переводим промпт, используем оригинальный русский
-            logger.info("Image job {}: Nano-banana model detected, using original Russian prompt without translation", job_id)
-            provider_prompt = prompt  # Используем оригинальный промпт без перевода
-        else:
-            # Если перевод не сработал, попробуем перевести здесь еще раз
-            # Проверяем, содержит ли промпт кириллицу (признак русского текста)
-            has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
-            logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
-            if has_cyrillic:
-                logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
-                try:
-                    translated = translate_to_english(prompt)
-                    if translated != prompt and translated:
-                        logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
-                                   job_id, prompt[:50], translated[:50])
-                        provider_prompt = translated
-                    else:
-                        logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
-                except Exception as exc:
-                    logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
+        # ВАЖНО: Для моделей, которые поддерживают русский (Nano Banana, Flux 2 Flex, gpt-create),
+        # provider_prompt уже установлен в русском варианте выше, НЕ ПЕРЕВОДИМ!
+        # Для остальных моделей проверяем, нужно ли переводить
+        logger.info("🔍 Image job {}: Translation check - is_nano_banana={}, is_flux2flex={}, is_gpt_create={}, will_skip_translation={}", 
+                    job_id, is_nano_banana, is_flux2flex, is_gpt_create, (is_nano_banana or is_flux2flex or is_gpt_create))
+        if not (is_nano_banana or is_flux2flex or is_gpt_create):
+            if provider_prompt != prompt:
+                # Если промпт был переведен в боте, используем переведенный
+                logger.info("Using translated prompt for job {}: '{}'", job_id, provider_prompt[:100])
+            else:
+                # Если provider_prompt == prompt, проверяем, нужно ли переводить
+                # Проверяем, содержит ли промпт кириллицу (признак русского текста)
+                has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in prompt)
+                logger.info("Image job {}: checking for Cyrillic in prompt: {}", job_id, has_cyrillic)
+                if has_cyrillic:
+                    logger.warning("Image job {}: provider_prompt is same as original (likely Russian), attempting translation in worker", job_id)
+                    try:
+                        translated = translate_to_english(prompt)
+                        if translated != prompt and translated:
+                            logger.info("Image job {}: successfully translated in worker: '{}' -> '{}'", 
+                                       job_id, prompt[:50], translated[:50])
+                            provider_prompt = translated
+                        else:
+                            logger.warning("Image job {}: translation in worker failed or returned same text, using original", job_id)
+                    except Exception as exc:
+                        logger.error("Image job {}: translation in worker failed: {}", job_id, exc)
+                else:
+                    logger.info("Image job {}: skipping translation (no Cyrillic detected, model={})", 
+                               job_id, model_name)
 
         # Используем обычную логику через очередь для всех моделей
         model_name = provider_options.get("model", "")

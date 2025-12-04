@@ -258,11 +258,12 @@ async def _queue_face_swap_job(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                balance_rub = balance_kopecks / 100.0
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Замена лица стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[

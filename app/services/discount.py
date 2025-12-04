@@ -59,10 +59,12 @@ class DiscountService:
         payment_id: int
     ) -> Tuple[int, int]:
         """
-        Apply discount to payment amount.
+        Record discount code usage for payment (for statistics).
+        NOTE: Discount is NOT applied to payment amount - balance is topped up with full amount.
+        Discount is applied only to operations, not to payments.
         
         Returns:
-            Tuple[int, int]: (discounted_amount, discount_amount)
+            Tuple[int, int]: (original_amount, discount_amount) - for compatibility, but discount is not applied
         """
         payment = db.query(Payment).filter(Payment.id == payment_id).first()
         if not payment:
@@ -70,11 +72,10 @@ class DiscountService:
 
         original_amount = payment.amount
         
-        # Calculate discount with proper rounding
+        # Calculate discount amount (for display/statistics only, NOT applied to payment)
         discount_amount = round(original_amount * discount_code.discount_percent / 100)
-        discounted_amount = original_amount - discount_amount
 
-        # Record usage
+        # Record usage (for statistics)
         user_discount = UserDiscountCode(
             user_id=user_id,
             discount_code_id=discount_code.id,
@@ -87,11 +88,13 @@ class DiscountService:
         db.commit()
 
         logger.info(
-            f"Applied discount {discount_code.code} ({discount_code.discount_percent}%) "
-            f"to payment {payment_id}: {original_amount}₽ -> {discounted_amount}₽"
+            f"Recorded discount code {discount_code.code} ({discount_code.discount_percent}%) "
+            f"usage for payment {payment_id}. Payment amount: {original_amount} kopecks ({original_amount / 100.0:.2f}₽). "
+            f"Note: Discount applies to operations only, not to payment amount."
         )
 
-        return discounted_amount, discount_amount
+        # Return original amount (discount is NOT applied to payment)
+        return original_amount, discount_amount
 
     @staticmethod
     def apply_free_generation_code(

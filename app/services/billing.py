@@ -201,9 +201,24 @@ class BillingService:
         # Convert price to kopecks (multiply by 100) for storage
         price_kopecks = int(round(price * 100))
         
+        # Detailed logging for debugging balance issues
+        balance_rub = balance.balance / 100.0
+        logger.info(
+            f"reserve_operation: balance check - user_id={user_id}, "
+            f"balance={balance.balance} kopecks ({balance_rub:.2f}₽), "
+            f"price={price}₽ ({price_kopecks} kopecks), "
+            f"operation_type={operation_type}, model={model}"
+        )
+        
         # Check balance (but don't charge yet) - balance is in kopecks
         if balance.balance < price_kopecks:
             balance_rub = balance.balance / 100.0
+            logger.error(
+                f"reserve_operation: INSUFFICIENT BALANCE - user_id={user_id}, "
+                f"balance={balance.balance} kopecks ({balance_rub:.2f}₽), "
+                f"price={price}₽ ({price_kopecks} kopecks), "
+                f"difference={price_kopecks - balance.balance} kopecks"
+            )
             db.rollback()
             return False, f"Insufficient balance. Need {price:.2f}₽, have {balance_rub:.2f}₽", None
 
@@ -591,9 +606,12 @@ class BillingService:
         return True
 
     @staticmethod
-    def add_balance(db: Session, user_id: int, amount: int) -> bool:
+    def add_balance(db: Session, user_id: int, amount: int | float) -> bool:
         """
         Add balance to user account.
+        
+        Args:
+            amount: Amount in rubles (int or float, will be converted to int)
         
         Returns:
             bool: Success
@@ -605,11 +623,18 @@ class BillingService:
             db.flush()
 
         # amount is in rubles, convert to kopecks
-        amount_kopecks = int(round(amount * 100))
+        # Ensure amount is treated as rubles and convert to int for consistency
+        amount_int = int(amount) if isinstance(amount, float) and amount.is_integer() else int(round(float(amount)))
+        amount_kopecks = int(round(amount_int * 100))
+        balance_before = balance.balance
         balance.balance += amount_kopecks
         db.commit()
         balance_rub = balance.balance / 100.0
-        logger.info(f"Added balance: user_id={user_id}, amount={amount}₽, new_balance={balance_rub:.2f}₽")
+        logger.info(
+            f"Added balance: user_id={user_id}, amount={amount_int}₽ ({amount_kopecks} kopecks), "
+            f"balance_before={balance_before} kopecks ({balance_before / 100.0:.2f}₽), "
+            f"balance_after={balance.balance} kopecks ({balance_rub:.2f}₽)"
+        )
         return True
 
     @staticmethod

@@ -52,20 +52,74 @@ MODEL_COSTS_USD = {
     "fal-ai/nano-banana-pro/edit": 0.15,
     "fal-ai/nano-banana": 0.0398,
     "fal-ai/nano-banana/edit": 0.0398,
+    "fal-ai/flux-2-flex": 0.06,  # Flux 2 Flex - 6 центов за операцию
+    "fal-ai/flux-2-pro/edit": 0.10,  # Flux 2 Pro Edit - примерная стоимость (временно отключена, но может быть в старых данных)
     "fal-ai/bytedance/seedream/v4/edit": 0.03,
     "fal-ai/bytedance/seedream/v4/text-to-image": 0.03,
     "fal-ai/any-llm": 0.001,
     "fal-ai/recraft/upscale/crisp": 0.004,
     "fal-ai/retoucher": 0.0013,
+    "fal-ai/face-swap": 0.01,  # Базовая модель Face Swap от Fal.ai
+    "fal-ai/chrono-edit": 0.05,  # Chrono Edit - примерная стоимость
     "wavespeed-ai/image-face-swap": 0.01,
+    "openai/gpt-image-1-mini": 0.15,  # OpenAI GPT Image 1 Mini через WaveSpeedAI (аналогично nano-banana-pro)
+    "openai/gpt-image-1-mini/edit": 0.15,  # OpenAI GPT Image 1 Mini Edit через WaveSpeedAI (аналогично nano-banana-pro/edit)
 }
 
-def get_model_cost_rub(model: str | None) -> float:
-    """Get model cost in rubles. Returns 0 if model is None or not found."""
+def get_model_by_operation_type(operation_type: str) -> str | None:
+    """Get default model name for operation type if model is not specified."""
+    # Маппинг типов операций на модели по умолчанию
+    operation_to_model = {
+        "upscale": "fal-ai/recraft/upscale/crisp",  # Улучшение качества - $0.004
+        "retouch": "fal-ai/bytedance/seedream/v4/edit",  # Ретушь - используем Seedream модель ($0.03)
+        "face_swap": "fal-ai/face-swap",  # Замена лица - $0.01 (базовая модель, может быть wavespeed-ai/image-face-swap)
+        "add_text": "openai/gpt-image-1-mini/edit",  # Добавление текста (через WaveSpeedAI)
+        "prompt_generation": "fal-ai/any-llm",  # Генерация промпта - $0.001
+    }
+    return operation_to_model.get(operation_type)
+
+
+def get_model_cost_rub(model: str | None, operation_type: str | None = None) -> float:
+    """Get model cost in rubles. Returns 0 if model is None or not found.
+    
+    If model is None or empty, tries to determine model from operation_type.
+    """
+    # Если модель не указана, пробуем определить по типу операции
+    if not model and operation_type:
+        model = get_model_by_operation_type(operation_type)
+    
     if not model:
         return 0.0
-    cost_usd = MODEL_COSTS_USD.get(model, 0.0)
-    return cost_usd * USD_TO_RUB_RATE
+    # Нормализуем имя модели (убираем пробелы, приводим к нижнему регистру для сравнения)
+    model_normalized = model.strip().lower() if isinstance(model, str) else str(model).lower()
+    # Пробуем найти точное совпадение (приводим ключи словаря к нижнему регистру для сравнения)
+    cost_usd = 0.0
+    matched_key = None
+    for key, value in MODEL_COSTS_USD.items():
+        if key.lower() == model_normalized:
+            cost_usd = value
+            matched_key = key
+            break
+    # Если не найдено точное совпадение, пробуем найти по частичному совпадению
+    if cost_usd == 0.0:
+        for key, value in MODEL_COSTS_USD.items():
+            key_lower = key.lower()
+            # Проверяем, содержит ли нормализованная модель ключ или наоборот
+            if model_normalized in key_lower or key_lower in model_normalized:
+                cost_usd = value
+                matched_key = key
+                break
+    # Логируем для отладки (только для важных моделей или если не найдено)
+    if cost_usd == 0.0 and model_normalized and ('flux' in model_normalized or 'nano' in model_normalized or 'seedream' in model_normalized):
+        import sys
+        # Логируем только если это важная модель, но не найдена
+        print(f"WARNING: get_model_cost_rub: Model '{model}' (normalized: '{model_normalized}') not found in MODEL_COSTS_USD", file=sys.stderr, flush=True)
+    result = cost_usd * USD_TO_RUB_RATE
+    # DEBUG: Log for flux-2-flex
+    if model and 'flux-2-flex' in model.lower():
+        import sys
+        print(f"DEBUG get_model_cost_rub: model={repr(model)}, normalized={model_normalized}, cost_usd={cost_usd}, result={result}", file=sys.stderr, flush=True)
+    return result
 
 
 def convert_price_to_rubles(price: int | None, created_at: datetime | None) -> float:
@@ -175,7 +229,7 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 "Да" if user.is_premium else "Нет",
                 format_datetime_moscow(user.created_at),
                 format_datetime_moscow(user.last_activity_at),
-                balance.balance if balance else 0,
+                (balance.balance / 100.0) if balance else 0.0,  # Баланс хранится в копейках, конвертируем в рубли
                 total_operations_after_migration,
                 total_spent_after_migration,
                 format_datetime_moscow(first_operation_after_migration),
@@ -253,12 +307,21 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
             
             if is_after_migration:
                 models_data[op.model]['count'] += 1
+                # Calculate cost for all operations (charged and free) - cost is real expense
+                # Если модель не указана, определяем по типу операции
+                model_cost = get_model_cost_rub(op.model, op.type)
+                # DEBUG: Log cost calculation for flux-2-flex
+                if op.model and 'flux-2-flex' in op.model.lower():
+                    import sys
+                    print(f"DEBUG models: model={repr(op.model)}, cost={model_cost}, count={models_data[op.model]['count']}, before_add={models_data[op.model]['cost']}", file=sys.stderr, flush=True)
+                models_data[op.model]['cost'] += model_cost
+                # DEBUG: Log after adding
+                if op.model and 'flux-2-flex' in op.model.lower():
+                    import sys
+                    print(f"DEBUG models AFTER: model={repr(op.model)}, cost_after={models_data[op.model]['cost']}", file=sys.stderr, flush=True)
                 if op.status == "charged":
                     price_rubles = float(op.price) / 100.0
                     models_data[op.model]['revenue'] += price_rubles
-                    # Calculate cost
-                    model_cost = get_model_cost_rub(op.model)
-                    models_data[op.model]['cost'] += model_cost
         
         # Sort by count descending
         sorted_models = sorted(models_data.items(), key=lambda x: x[1]['count'], reverse=True)
@@ -367,12 +430,19 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                     created_at_utc = op.created_at.astimezone(timezone.utc)
                 
                 if created_at_utc >= KOPECKS_MIGRATION_DATETIME:
-                    total_revenue += float(op.price) / 100.0
-                    total_cost += get_model_cost_rub(op.model)
+                    # Calculate cost for all operations (charged and free) - cost is real expense
+                    # Если модель не указана, определяем по типу операции
+                    total_cost += get_model_cost_rub(op.model, op.type)
+                    if op.status == "charged":
+                        total_revenue += float(op.price) / 100.0
             elif op.price > 100:
-                total_revenue += float(op.price) / 100.0
-                total_cost += get_model_cost_rub(op.model)
-        total_balance = db.query(func.sum(Balance.balance)).scalar() or 0
+                # Calculate cost for all operations (charged and free) - cost is real expense
+                # Если модель не указана, определяем по типу операции
+                total_cost += get_model_cost_rub(op.model, op.type)
+                if op.status == "charged":
+                    total_revenue += float(op.price) / 100.0
+        total_balance_kopecks = db.query(func.sum(Balance.balance)).scalar() or 0
+        total_balance_rubles = float(total_balance_kopecks) / 100.0  # Баланс хранится в копейках, конвертируем в рубли
         total_profit = total_revenue - total_cost
         
         ws_summary.append(["Всего пользователей", total_users])
@@ -380,7 +450,7 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
         ws_summary.append(["Всего заработано (₽)", total_revenue])
         ws_summary.append(["Общая себестоимость (₽)", total_cost])
         ws_summary.append(["Общая прибыль (₽)", total_profit])
-        ws_summary.append(["Общий баланс пользователей (₽)", total_balance])
+        ws_summary.append(["Общий баланс пользователей (₽)", total_balance_rubles])
         ws_summary.append(["Дата выгрузки", format_datetime_moscow(datetime.now(timezone.utc))])
         
         # 6. User operations statistics sheet
@@ -425,12 +495,21 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 # Key includes model to track which models were used
                 key = (tg_id, username, first_name, op_type, model or "")
                 user_ops_data[key]['count'] += 1
+                # Calculate cost for all operations (charged and free) - cost is real expense
+                # Если модель не указана, определяем по типу операции
+                model_cost = get_model_cost_rub(model, op_type)
+                # DEBUG: Log cost calculation for flux-2-flex
+                if model and 'flux-2-flex' in model.lower():
+                    import sys
+                    print(f"DEBUG user_ops: model={repr(model)}, cost={model_cost}, count={user_ops_data[key]['count']}, before_add={user_ops_data[key]['cost']}", file=sys.stderr, flush=True)
+                user_ops_data[key]['cost'] += model_cost
+                # DEBUG: Log after adding
+                if model and 'flux-2-flex' in model.lower():
+                    import sys
+                    print(f"DEBUG user_ops AFTER: model={repr(model)}, cost_after={user_ops_data[key]['cost']}", file=sys.stderr, flush=True)
                 if status == "charged":
                     price_rubles = float(price) / 100.0
                     user_ops_data[key]['revenue'] += price_rubles
-                    # Calculate cost
-                    model_cost = get_model_cost_rub(model)
-                    user_ops_data[key]['cost'] += model_cost
         
         # Sort by telegram_id, then by count descending
         sorted_user_ops = sorted(user_ops_data.items(), key=lambda x: (x[0][0], -x[1]['count']))
@@ -462,7 +541,8 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
             Operation.price,
             Operation.status,
             Operation.user_id,
-            Operation.model
+            Operation.model,
+            Operation.type
         ).filter(
             Operation.status.in_(["charged", "free"])
         ).all()
@@ -488,12 +568,13 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 date_key = moscow_dt.date() if hasattr(moscow_dt, 'date') else moscow_dt
                 daily_data[date_key]['count'] += 1
                 daily_data[date_key]['users'].add(op.user_id)
+                # Calculate cost for all operations (charged and free) - cost is real expense
+                # Если модель не указана, определяем по типу операции
+                model_cost = get_model_cost_rub(op.model, op.type)
+                daily_data[date_key]['cost'] += model_cost
                 if op.status == "charged":
                     price_rubles = float(op.price) / 100.0
                     daily_data[date_key]['revenue'] += price_rubles
-                    # Calculate cost
-                    model_cost = get_model_cost_rub(op.model)
-                    daily_data[date_key]['cost'] += model_cost
         
         # Sort by date descending
         sorted_daily = sorted(daily_data.items(), key=lambda x: x[0], reverse=True)
@@ -524,7 +605,8 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
             Operation.price,
             Operation.status,
             Operation.user_id,
-            Operation.model
+            Operation.model,
+            Operation.type
         ).filter(
             Operation.status.in_(["charged", "free"])
         ).all()
@@ -552,12 +634,13 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 
                 weekly_data[week_key]['count'] += 1
                 weekly_data[week_key]['users'].add(op.user_id)
+                # Calculate cost for all operations (charged and free) - cost is real expense
+                # Если модель не указана, определяем по типу операции
+                model_cost = get_model_cost_rub(op.model, op.type)
+                weekly_data[week_key]['cost'] += model_cost
                 if op.status == "charged":
                     price_rubles = float(op.price) / 100.0
                     weekly_data[week_key]['revenue'] += price_rubles
-                    # Calculate cost
-                    model_cost = get_model_cost_rub(op.model)
-                    weekly_data[week_key]['cost'] += model_cost
         
         # Sort by date descending
         sorted_weeks = sorted(weekly_data.items(), key=lambda x: datetime.strptime(x[0], "%d.%m.%Y"), reverse=True)
@@ -589,7 +672,8 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
             Operation.price,
             Operation.status,
             Operation.user_id,
-            Operation.model
+            Operation.model,
+            Operation.type
         ).filter(
             Operation.status.in_(["charged", "free"])
         ).all()
@@ -624,12 +708,13 @@ def export_statistics_to_excel(output_file: str = "statistics_export.xlsx"):
                 month_key = (year, month)
                 monthly_data[month_key]['count'] += 1
                 monthly_data[month_key]['users'].add(op.user_id)
+                # Calculate cost for all operations (charged and free) - cost is real expense
+                # Если модель не указана, определяем по типу операции
+                model_cost = get_model_cost_rub(op.model, op.type)
+                monthly_data[month_key]['cost'] += model_cost
                 if op.status == "charged":
                     price_rubles = float(op.price) / 100.0
                     monthly_data[month_key]['revenue'] += price_rubles
-                    # Calculate cost
-                    model_cost = get_model_cost_rub(op.model)
-                    monthly_data[month_key]['cost'] += model_cost
         
         # Russian month names
         month_names = {

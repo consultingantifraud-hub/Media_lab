@@ -26,7 +26,7 @@ from app.providers.fal.models_map import (
 )
 
 
-SEEDREAM_MODEL = "fal-ai/bytedance/seedream/v4/edit"
+SEEDREAM_MODEL = settings.fal_seedream_edit_model
 CHRONO_EDIT_MODEL = "fal-ai/chrono-edit"
 UPSCALE_MODEL = settings.fal_upscale_model
 QUEUE_UPSCALE_MODELS = {

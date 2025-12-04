@@ -33,10 +33,12 @@ IMAGE_MODEL_ALIASES = {
     "seededit": "fal-ai/bytedance/seededit/v3/edit-image",
     "seededit-v3": "fal-ai/bytedance/seededit/v3/edit-image",
     "seededit3": "fal-ai/bytedance/seededit/v3/edit-image",
-    "seedream": "fal-ai/bytedance/seedream/v4/edit",
-    "seedream-edit": "fal-ai/bytedance/seedream/v4/edit",
-    "seedream-create": "fal-ai/bytedance/seedream/v4/text-to-image",  # Модель для создания без входного изображения
+    "seedream": settings.fal_seedream_edit_model,
+    "seedream-edit": settings.fal_seedream_edit_model,
+    "seedream-create": settings.fal_seedream_create_model,  # Модель для создания без входного изображения
     "flux2flex-create": "fal-ai/flux-2-flex",  # Flux 2 Flex модель для создания изображений
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # "flux2pro-edit": "fal-ai/flux-2-pro/edit",  # Flux 2 Pro модель для редактирования изображений
     "gpt-image-1-mini": "fal-ai/gpt-image-1-mini/edit",
     "reve": "fal-ai/reve/fast/edit",
     "stylish": "fal-ai/ideogram/v2/edit",
@@ -60,9 +62,12 @@ MODEL_CAPABILITIES = {
     "fal-ai/reve/fast/edit": {"requires_mask": False},
     "fal-ai/reve/edit": {"requires_mask": False},
     "fal-ai/bytedance/seededit/v3/edit-image": {"requires_mask": False},
-    "fal-ai/bytedance/seedream/v4/edit": {"requires_mask": False},
+    "fal-ai/bytedance/seedream/v4/edit": {"requires_mask": False},  # Обратная совместимость
+    settings.fal_seedream_edit_model: {"requires_mask": False},  # Текущая версия (v4.5)
     "fal-ai/gpt-image-1-mini/edit": {"requires_mask": False},
     "fal-ai/ideogram/v2/edit": {"requires_mask": False},
+    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
+    # "fal-ai/flux-2-pro/edit": {"requires_mask": False},  # Flux 2 Pro Edit - редактирование без маски
     "fal-ai/flux-pro/kontext": {"requires_mask": True, "inpaint_payload": True},
 }
 
@@ -72,7 +77,10 @@ MODEL_DEFAULT_OPTIONS: dict[str, dict[str, Any]] = {
         "output_format": "png",
     },
     "fal-ai/bytedance/seedream/v4/text-to-image": {
-        "output_format": "png",  # PNG формат для лучшего качества
+        "output_format": "png",  # PNG формат для лучшего качества (обратная совместимость)
+    },
+    settings.fal_seedream_create_model: {
+        "output_format": "png",  # PNG формат для лучшего качества (текущая версия v4.5)
     },
     "fal-ai/recraft/upscale/crisp": {
         "enable_safety_checker": False,

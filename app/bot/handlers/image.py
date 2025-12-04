@@ -17,16 +17,13 @@ from app.bot.keyboards.main import (
     IMAGE_FACE_SWAP_BUTTON,
     IMAGE_SEEDREAM_CREATE_BUTTON,
     IMAGE_GPT_CREATE_BUTTON,
-    IMAGE_FLUX2FLEX_CREATE_BUTTON,
     IMAGE_EDIT_BUTTON,
     IMAGE_SMART_MERGE_BUTTON,
     IMAGE_RETOUCHER_BUTTON,
     IMAGE_STYLISH_TEXT_BUTTON,
     IMAGE_EDIT_CHRONO_BUTTON,
     IMAGE_EDIT_SEDEDIT_BUTTON,
-    IMAGE_EDIT_FLUX2PRO_BUTTON,
     IMAGE_SMART_MERGE_PRO_BUTTON,
-    IMAGE_SMART_MERGE_FLUX2PRO_BUTTON,
     IMAGE_SMART_MERGE_NANO_BUTTON,
     IMAGE_SMART_MERGE_SEEDREAM_BUTTON,
     IMAGE_UPSCALE_BUTTON,
@@ -142,8 +139,7 @@ async def _send_error_notification(message: types.Message, error_context: str = 
 IMAGE_LIGHT_MODEL = settings.fal_standard_model
 IMAGE_STANDARD_MODEL = settings.fal_premium_model
 IMAGE_EDIT_MODEL = settings.fal_edit_model
-IMAGE_EDIT_ALT_MODEL = "fal-ai/bytedance/seedream/v4/edit"
-IMAGE_EDIT_FLUX2PRO_MODEL = "fal-ai/flux-2-pro/edit"
+IMAGE_EDIT_ALT_MODEL = settings.fal_seedream_edit_model
 LAST_JOB_BY_CHAT: dict[int, str] = {}
 PROMPT_ACCEPTED_TEXT = (
     "Промпт принят ✅.\nТеперь выберите действие из меню."
@@ -169,9 +165,8 @@ SMART_MERGE_SOURCES_KEY = "smart_merge_sources"
 SMART_MERGE_MODEL_KEY = "smart_merge_model"
 SMART_MERGE_SIZE_KEY = "smart_merge_size"  # Ключ для хранения выбранного размера
 SMART_MERGE_PRO_MODEL = "fal-ai/nano-banana-pro/edit"
-SMART_MERGE_FLUX2PRO_MODEL = "fal-ai/flux-2-pro/edit"
 SMART_MERGE_DEFAULT_MODEL = "fal-ai/nano-banana/edit"
-SMART_MERGE_SEEDREAM_MODEL = "fal-ai/bytedance/seedream/v4/edit"
+SMART_MERGE_SEEDREAM_MODEL = settings.fal_seedream_edit_model
 SMART_MERGE_DEFAULT_SIZE = "1024x1024"
 SMART_MERGE_DEFAULT_ASPECT_RATIO = "1:1"
 SMART_MERGE_MAX_IMAGES = 8
@@ -260,7 +255,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
     },
     "seedream-create": {
         "label": "изображение",
-        "model": "fal-ai/bytedance/seedream/v4/text-to-image",  # Модель для создания без входного изображения
+        "model": settings.fal_seedream_create_model,  # Модель для создания без входного изображения
         "base": {
             "output_format": "png",
             "guidance_scale": 12.0,  # Увеличено для максимального качества и детализации
@@ -273,24 +268,6 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
             "vertical": {"size": "1536x2048", "aspect_ratio": "3:4", "width": 1536, "height": 2048},
             "square": {"size": "2048x2048", "aspect_ratio": "1:1", "width": 2048, "height": 2048},
             "horizontal": {"size": "2048x1536", "aspect_ratio": "4:3", "width": 2048, "height": 1536},
-        },
-    },
-    "flux2flex-create": {
-        "label": "изображение",
-        "model": "fal-ai/flux-2-flex",  # Flux 2 Flex модель
-        "base": {
-            "output_format": "png",  # PNG для лучшего качества
-            "guidance_scale": 5.0,  # Снижено для более естественного вида (было 10.0 - слишком детализировано)
-            "num_inference_steps": 28,  # Снижено для более естественного вида (было 50 - слишком детализировано)
-            "enable_prompt_expansion": True,  # По умолчанию True
-            "enable_safety_checker": True,  # По умолчанию True
-        },
-        "sizes": {
-            # Flux 2 Flex поддерживает стандартные размеры через image_size enum
-            # Но правильные размеры будут установлены через get_model_format_mapping
-            "vertical": {"image_size": "portrait_4_3", "aspect_ratio": "3:4"},
-            "square": {"image_size": "square", "aspect_ratio": "1:1"},
-            "horizontal": {"image_size": "landscape_4_3", "aspect_ratio": "4:3"},
         },
     },
     "gpt-create": {
@@ -369,13 +346,6 @@ async def _enqueue_image_task(
         "gpt-image-1-mini" in (model or "").lower()
     )
     
-    # Определяем модель Flux 2 Flex для правильного расчета цены
-    # Если selected_model = "flux2flex-create", то model должен быть "fal-ai/flux-2-flex"
-    # ВАЖНО: Не изменяем base_options, только локальную переменную model для расчета цены
-    model_for_price = model
-    if selected_model == "flux2flex-create" and not model_for_price:
-        model_for_price = "fal-ai/flux-2-flex"
-    
     # Проверка баланса (если operation_id не передан, проверяем баланс)
     if operation_id is None:
         from app.services.pricing import get_operation_price
@@ -389,8 +359,8 @@ async def _enqueue_image_task(
             
             user, _ = BillingService.get_or_create_user(db, user_id, message.from_user)
             
-            # Получаем цену для отображения (get_operation_price теперь проверяет Flux 2 Flex)
-            price = get_operation_price("generate", model_for_price, is_nano_banana_pro)
+            # Получаем цену для отображения
+            price = get_operation_price("generate", model, is_nano_banana_pro)
             
             # Check for active discount code in state or database
             discount_percent = None
@@ -399,18 +369,17 @@ async def _enqueue_image_task(
             
             success, error_msg, op_id = BillingService.charge_operation(
                 db, user.id, "generate",
-                model=model_for_price,  # Используем model_for_price для правильного расчета цены
+                model=model,
                 is_nano_banana_pro=is_nano_banana_pro,
                 discount_percent=discount_percent
             )
             
             if not success:
-                balance_kopecks = BillingService.get_user_balance(db, user.id)
-                balance_rub = balance_kopecks / 100.0
+                balance = BillingService.get_user_balance(db, user.id)
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Операция стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -429,27 +398,12 @@ async def _enqueue_image_task(
         finally:
             db.close()
     
-    # Очищаем промпт от возможных префиксов "Промпт: ", "Prompt: ", "🚀 Генерирую: ...", и накопленных префиксов
+    # Очищаем промпт от возможных префиксов "Промпт: " или "Prompt: "
     prompt = prompt.strip()
-    
-    # Удаляем все префиксы "🚀 Генерирую: изображение · ..."
-    while "🚀 Генерирую: изображение ·" in prompt:
-        idx = prompt.find("🚀 Генерирую: изображение ·")
-        next_line = prompt.find("\n", idx)
-        if next_line != -1:
-            prompt = prompt[next_line + 1:].strip()
-        else:
-            break
-    
-    # Удаляем все префиксы "Промпт: " или "Prompt: "
-    while prompt.lower().startswith("промпт:") or prompt.lower().startswith("prompt:"):
-        if prompt.lower().startswith("промпт:"):
-            prompt = prompt[7:].strip()
-        elif prompt.lower().startswith("prompt:"):
-            prompt = prompt[7:].strip()
-        # Если после удаления префикса остался еще один префикс, продолжаем
-        if not (prompt.lower().startswith("промпт:") or prompt.lower().startswith("prompt:")):
-            break
+    if prompt.lower().startswith("промпт:"):
+        prompt = prompt[7:].strip()
+    elif prompt.lower().startswith("prompt:"):
+        prompt = prompt[7:].strip()
     
     logger.info("_enqueue_image_task: starting, prompt='{}', label='{}', base_options={}, operation_id={}", 
                 prompt[:50], label, base_options, operation_id)
@@ -458,23 +412,16 @@ async def _enqueue_image_task(
                    list(base_options.keys()), base_options.get("width"), base_options.get("height"), base_options.get("num_inference_steps"))
     options = _build_notify_options(message, prompt, base_options)
     
-    # Проверяем, является ли модель Nano Banana, Nano Banana Pro или Flux 2 Flex (могут принимать русский текст)
+    # Проверяем, является ли модель Nano Banana или Nano Banana Pro (могут принимать русский текст)
     is_nano_banana = model == IMAGE_STANDARD_MODEL or model == "fal-ai/nano-banana"
-    is_flux2flex = model == "fal-ai/flux-2-flex" or "flux-2-flex" in (model or "").lower()
-    logger.info("_enqueue_image_task: is_nano_banana={}, is_nano_banana_pro={}, is_flux2flex={}", is_nano_banana, is_nano_banana_pro, is_flux2flex)
+    logger.info("_enqueue_image_task: is_nano_banana={}, is_nano_banana_pro={}", is_nano_banana, is_nano_banana_pro)
     
-    # Для Flux 2 Flex и Nano Banana не устанавливаем provider_prompt в боте,
-    # чтобы воркер использовал оригинальный русский промпт
+    translated_prompt = prompt  # Default to original prompt
     if is_nano_banana or is_nano_banana_pro:
         model_name = "Nano Banana Pro" if is_nano_banana_pro else "Nano Banana"
         logger.info("_enqueue_image_task: skipping translation for {} model, using original Russian prompt", model_name)
-        # Не устанавливаем provider_prompt, чтобы воркер использовал оригинальный промпт
-    elif is_flux2flex:
-        logger.info("_enqueue_image_task: skipping translation for Flux 2 Flex model, using original Russian prompt")
-        # Не устанавливаем provider_prompt, чтобы воркер использовал оригинальный промпт
     else:
         logger.info("_enqueue_image_task: calling translate_to_english in executor")
-        translated_prompt = prompt  # Default to original prompt
         try:
             # Выполняем синхронный перевод в отдельном потоке с таймаутом, чтобы не блокировать event loop
             # Увеличено до 10 секунд для более надежного перевода
@@ -500,10 +447,10 @@ async def _enqueue_image_task(
         except Exception as exc:
             logger.error("_enqueue_image_task: translate_to_english failed: {}, using original prompt", exc, exc_info=True)
             translated_prompt = prompt  # Fallback to original prompt
-        
-        # Устанавливаем provider_prompt только для моделей, которые требуют перевода
-        # Это позволяет worker'у видеть, что перевод был попытка
-        options["provider_prompt"] = translated_prompt
+    
+    # Всегда устанавливаем provider_prompt, даже если перевод не сработал
+    # Это позволяет worker'у видеть, что перевод был попытка
+    options["provider_prompt"] = translated_prompt
     logger.info("_enqueue_image_task: calling enqueue_image with prompt='{}'", prompt[:50])
     # Передаем operation_id в options для worker
     if operation_id:
@@ -566,12 +513,11 @@ async def _enqueue_image_edit_task(
             )
             
             if not success:
-                balance_kopecks = BillingService.get_user_balance(db, user.id)
-                balance_rub = balance_kopecks / 100.0
+                balance = BillingService.get_user_balance(db, user.id)
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Редактирование стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -598,90 +544,80 @@ async def _enqueue_image_edit_task(
     # Определяем модель для выбора стратегии обработки промпта
     model_name = base_payload.get("model", IMAGE_EDIT_MODEL)
     is_seedream = "seedream" in model_name.lower()
-    is_flux2pro = "flux-2-pro" in model_name.lower() or "flux2pro" in model_name.lower()
     
     options = _build_notify_options(message, prompt, base_payload)
-    
-    # Для Flux 2 Pro используем оригинальный русский промпт (поддерживает русский язык)
-    if is_flux2pro:
-        logger.info("_enqueue_image_edit_task: Flux 2 Pro detected, using original Russian prompt without translation")
-        # Не переводим промпт для Flux 2 Pro
-        provider_prompt = prompt
+    logger.info("_enqueue_image_edit_task: calling translate_to_english in executor")
+    try:
+        # Выполняем синхронный перевод в отдельном потоке с таймаутом, чтобы не блокировать event loop
+        translated_prompt = await asyncio.wait_for(
+            asyncio.to_thread(translate_to_english, prompt),
+            timeout=5.0  # Таймаут 5 секунд для перевода
+        )
+        logger.info("_enqueue_image_edit_task: translate_to_english completed, translated='{}'", 
+                    translated_prompt[:50] if translated_prompt else None)
+    except asyncio.TimeoutError:
+        logger.warning("_enqueue_image_edit_task: translate_to_english timed out after 5s, using original prompt")
+        translated_prompt = prompt  # Fallback to original prompt
+    except Exception as exc:
+        logger.error("_enqueue_image_edit_task: translate_to_english failed: {}", exc, exc_info=True)
+        translated_prompt = prompt  # Fallback to original prompt
+
+    # Для Seedream используем упрощенный промпт без лишних дополнений - модель сама хорошо понимает запросы
+    if is_seedream:
+        logger.info("_enqueue_image_edit_task: Seedream detected, using simplified prompt without reinforcement instructions")
+        # Используем только переведенный промпт без дополнительных инструкций
+        if translated_prompt != prompt:
+            options["provider_prompt"] = translated_prompt
     else:
-        logger.info("_enqueue_image_edit_task: calling translate_to_english in executor")
-        try:
-            # Выполняем синхронный перевод в отдельном потоке с таймаутом, чтобы не блокировать event loop
-            translated_prompt = await asyncio.wait_for(
-                asyncio.to_thread(translate_to_english, prompt),
-                timeout=5.0  # Таймаут 5 секунд для перевода
+        # Для других моделей (Chrono Edit и т.д.) используем полный набор инструкций
+        logger.info("_enqueue_image_edit_task: building reinforcement prompt for non-Seedream model")
+        reinforcement_parts: list[str] = []
+        lowered = translated_prompt.lower()
+        if any(keyword in lowered for keyword in ("remove", "delete", "erase", "удали", "убери", "стереть")):
+            reinforcement_parts.append(
+                "Remove the specified content completely. The area must be clean, empty, and seamlessly blended."
             )
-            logger.info("_enqueue_image_edit_task: translate_to_english completed, translated='{}'", 
-                        translated_prompt[:50] if translated_prompt else None)
-        except asyncio.TimeoutError:
-            logger.warning("_enqueue_image_edit_task: translate_to_english timed out after 5s, using original prompt")
-            translated_prompt = prompt  # Fallback to original prompt
-        except Exception as exc:
-            logger.error("_enqueue_image_edit_task: translate_to_english failed: {}", exc, exc_info=True)
-            translated_prompt = prompt  # Fallback to original prompt
-
-        # Для Seedream используем упрощенный промпт без лишних дополнений - модель сама хорошо понимает запросы
-        if is_seedream:
-            logger.info("_enqueue_image_edit_task: Seedream detected, using simplified prompt without reinforcement instructions")
-            # Используем только переведенный промпт без дополнительных инструкций
-            if translated_prompt != prompt:
-                options["provider_prompt"] = translated_prompt
-            provider_prompt = translated_prompt if translated_prompt != prompt else prompt
-        else:
-            # Для других моделей (Chrono Edit и т.д.) используем полный набор инструкций
-            logger.info("_enqueue_image_edit_task: building reinforcement prompt for non-Seedream model")
-            reinforcement_parts: list[str] = []
-            lowered = translated_prompt.lower()
-            if any(keyword in lowered for keyword in ("remove", "delete", "erase", "удали", "убери", "стереть")):
+        if any(keyword in lowered for keyword in ("add", "place", "insert", "добав", "помест", "встав")):
+            reinforcement_parts.append(
+                "Add the requested content clearly and in high detail. It must be fully visible and match the scene."
+            )
+            # Специальная обработка для добавления людей
+            if any(keyword in lowered for keyword in ("person", "человек", "люди", "человека", "мужчин", "женщин", "хозяин", "owner", "girl", "девушка", "девушки", "woman", "женщина", "man", "мужчина")):
                 reinforcement_parts.append(
-                    "Remove the specified content completely. The area must be clean, empty, and seamlessly blended."
+                    "The person must be realistically integrated into the scene with proper lighting, shadows, and perspective. "
+                    "Ensure the person appears natural and seamlessly blended with the existing environment. "
+                    "Maintain realistic human proportions and scale relative to other objects in the scene."
                 )
-            if any(keyword in lowered for keyword in ("add", "place", "insert", "добав", "помест", "встав")):
-                reinforcement_parts.append(
-                    "Add the requested content clearly and in high detail. It must be fully visible and match the scene."
-                )
-                # Специальная обработка для добавления людей
-                if any(keyword in lowered for keyword in ("person", "человек", "люди", "человека", "мужчин", "женщин", "хозяин", "owner", "girl", "девушка", "девушки", "woman", "женщина", "man", "мужчина")):
+                if any(keyword in lowered for keyword in ("full", "полный", "рост", "standing", "стоя", "стоит", "стоящий", "upright")):
                     reinforcement_parts.append(
-                        "The person must be realistically integrated into the scene with proper lighting, shadows, and perspective. "
-                        "Ensure the person appears natural and seamlessly blended with the existing environment. "
-                        "Maintain realistic human proportions and scale relative to other objects in the scene."
+                        "The person must be shown in full height, standing upright, with their entire body visible from head to feet."
                     )
-                    if any(keyword in lowered for keyword in ("full", "полный", "рост", "standing", "стоя", "стоит", "стоящий", "upright")):
-                        reinforcement_parts.append(
-                            "The person must be shown in full height, standing upright, with their entire body visible from head to feet."
-                        )
-                    if any(keyword in lowered for keyword in ("second", "вторая", "второй", "another", "еще", "ещё")):
-                        reinforcement_parts.append(
-                            "Add an additional person to the scene. The new person should be distinct from any existing people and properly positioned in the composition."
-                        )
-            if "replace" in lowered or "замен" in lowered:
-                reinforcement_parts.append(
-                    "Replace the target element entirely and ensure the new content fits naturally with proper lighting and perspective."
-                )
-
-            reinforcement_instruction = " ".join(reinforcement_parts).strip()
-            logger.info("_enqueue_image_edit_task: reinforcement_instruction='{}'", reinforcement_instruction[:100] if reinforcement_instruction else None)
-
-            enforcement_suffix = (
-                "You must strictly follow every part of the user's request. "
-                "Ensure the output fully reflects all changes."
+                if any(keyword in lowered for keyword in ("second", "вторая", "второй", "another", "еще", "ещё")):
+                    reinforcement_parts.append(
+                        "Add an additional person to the scene. The new person should be distinct from any existing people and properly positioned in the composition."
+                    )
+        if "replace" in lowered or "замен" in lowered:
+            reinforcement_parts.append(
+                "Replace the target element entirely and ensure the new content fits naturally with proper lighting and perspective."
             )
 
-            enhanced_prompt_lines = [translated_prompt]
-            if reinforcement_instruction:
-                enhanced_prompt_lines.append(reinforcement_instruction)
-            enhanced_prompt_lines.append(enforcement_suffix)
-            enforced_prompt = "\n".join(enhanced_prompt_lines)
-            logger.info("_enqueue_image_edit_task: enforced_prompt built, length={}", len(enforced_prompt))
+        reinforcement_instruction = " ".join(reinforcement_parts).strip()
+        logger.info("_enqueue_image_edit_task: reinforcement_instruction='{}'", reinforcement_instruction[:100] if reinforcement_instruction else None)
 
-            if enforced_prompt != prompt:
-                options["provider_prompt"] = enforced_prompt
-            provider_prompt = enforced_prompt
+        enforcement_suffix = (
+            "You must strictly follow every part of the user's request. "
+            "Ensure the output fully reflects all changes."
+        )
+
+        enhanced_prompt_lines = [translated_prompt]
+        if reinforcement_instruction:
+            enhanced_prompt_lines.append(reinforcement_instruction)
+        enhanced_prompt_lines.append(enforcement_suffix)
+        enforced_prompt = "\n".join(enhanced_prompt_lines)
+        logger.info("_enqueue_image_edit_task: enforced_prompt built, length={}", len(enforced_prompt))
+
+        if enforced_prompt != prompt:
+            options["provider_prompt"] = enforced_prompt
     
     # Передаем operation_id в options для worker
     if operation_id:
@@ -691,14 +627,11 @@ async def _enqueue_image_edit_task(
     else:
         logger.warning("_enqueue_image_edit_task: operation_id is None, not adding to options")
     
-    # Для Flux 2 Pro используем provider_prompt (русский), для остальных - оригинальный prompt
-    final_prompt = provider_prompt if is_flux2pro else prompt
-    
     logger.info("_enqueue_image_edit_task: calling enqueue_image_edit with prompt='{}', image_path='{}', model='{}', operation_id={}, options_keys={}", 
-                final_prompt[:50], image_path, base_payload.get("model"), operation_id, list(options.keys()))
+                prompt[:50], image_path, base_payload.get("model"), operation_id, list(options.keys()))
     try:
         job_id, _ = enqueue_image_edit(
-            prompt=final_prompt,
+            prompt=prompt,
             image_path=image_path.as_posix(),
             mask_path=mask_path.as_posix() if mask_path else None,
             **options,
@@ -836,35 +769,13 @@ def _parse_smart_merge_input(text: str) -> tuple[str, dict[str, str]]:
 
 def _build_smart_merge_base_options(overrides: dict[str, str] | None = None) -> Dict[str, Any]:
     overrides = overrides or {}
-    
-    # Определяем модель для правильной обработки размеров
-    model = overrides.get("model") or SMART_MERGE_DEFAULT_MODEL
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-    # is_flux2pro = "flux-2-pro" in model.lower() and "/edit" in model.lower()
-    
     options: Dict[str, Any] = {
-        "model": model,
+        "model": overrides.get("model") or SMART_MERGE_DEFAULT_MODEL,
+        "size": overrides.get("size") or SMART_MERGE_DEFAULT_SIZE,
+        "aspect_ratio": overrides.get("aspect_ratio") or SMART_MERGE_DEFAULT_ASPECT_RATIO,
         "output_format": "png",  # Всегда используем PNG для максимального качества
     }
-    
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-    # # Для Flux 2 Pro Edit не устанавливаем дефолтные size и aspect_ratio, если есть width и height
-    # # Для других моделей устанавливаем дефолтные значения
-    # if is_flux2pro:
-    #     # Для Flux 2 Pro Edit проверяем наличие width и height
-    #     if "width" in overrides or "height" in overrides:
-    #         # Для Flux 2 Pro Edit используем только width и height, не устанавливаем size и aspect_ratio
-    #         logger.info("_build_smart_merge_base_options: Flux 2 Pro Edit detected with width={}/height={}, skipping default size/aspect_ratio", 
-    #                    overrides.get("width"), overrides.get("height"))
-    #     else:
-    #         # Если width/height не переданы, логируем предупреждение
-    #         logger.warning("_build_smart_merge_base_options: Flux 2 Pro Edit detected but width/height not in overrides! Available keys: {}", list(overrides.keys()))
-    # else:
-    # Для всех моделей устанавливаем дефолтные значения
-    options["size"] = overrides.get("size") or SMART_MERGE_DEFAULT_SIZE
-    options["aspect_ratio"] = overrides.get("aspect_ratio") or SMART_MERGE_DEFAULT_ASPECT_RATIO
-    
-    # Добавляем width и height, если они переданы (для Nano Banana Pro и Flux 2 Pro Edit)
+    # Добавляем width и height, если они переданы (для Nano Banana Pro)
     if "width" in overrides:
         options["width"] = overrides["width"]
     if "height" in overrides:
@@ -931,12 +842,11 @@ async def _trigger_upscale_for_job(message: types.Message, job_id: str, operatio
             )
             
             if not success:
-                balance_kopecks = BillingService.get_user_balance(db, user.id)
-                balance_rub = balance_kopecks / 100.0
+                balance = BillingService.get_user_balance(db, user.id)
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1082,12 +992,11 @@ async def _enqueue_retoucher_task(
             )
             
             if not success:
-                balance_kopecks = BillingService.get_user_balance(db, user.id)
-                balance_rub = balance_kopecks / 100.0
+                balance = BillingService.get_user_balance(db, user.id)
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Ретушь стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1325,7 +1234,6 @@ async def _handle_edit_text(message: types.Message, state: FSMContext, stage: st
             "Отлично! Теперь выберите модель редактирования:\n"
             "• Chrono Edit — максимально реалистичное удаление/смена объектов\n"
             "• Seedream — более продвинутая модель, лучше добавляет персонажей и латинский текст\n"
-            "• Flux 2 Pro — production-ready модель, поддерживает русский язык, multi-reference editing\n"
             "Если передумаете, нажмите «ℹ️ Info» для сброса.",
             reply_markup=build_edit_model_keyboard(),
         )
@@ -1339,7 +1247,7 @@ async def _handle_edit_text(message: types.Message, state: FSMContext, stage: st
         else:
             logger.warning("_handle_edit_text: in await_model stage, but text '{}' is not a model button", text)
             await message.answer(
-                "Пожалуйста, выберите модель редактирования из предложенных кнопок: Chrono Edit, Seedream или Flux 2 Pro.",
+                "Пожалуйста, выберите модель редактирования из предложенных кнопок: Chrono Edit или Seedream.",
                 reply_markup=build_edit_model_keyboard(),
             )
         return
@@ -1371,13 +1279,6 @@ async def _require_prompt(message: types.Message, state: FSMContext) -> str | No
 async def handle_create(message: types.Message, state: FSMContext) -> None:
     """Обработчик кнопки 'Создать' - показывает выбор моделей."""
     try:
-        # Очищаем состояние баланса, если оно было установлено
-        from app.bot.handlers.billing import PaymentStates
-        current_state = await state.get_state()
-        if current_state == PaymentStates.BALANCE_MENU_SHOWN:
-            logger.info("handle_create: clearing BALANCE_MENU_SHOWN state")
-            await state.clear()
-        
         # Проверяем, не находимся ли мы в режиме "Написать"
         from app.bot.handlers.prompt_writer import PromptWriterStates
         current_state = await state.get_state()
@@ -1526,37 +1427,6 @@ async def handle_seedream_create(message: types.Message, state: FSMContext) -> N
         await _send_error_notification(message, "handle_seedream_create")
 
 
-async def handle_flux2flex_create(message: types.Message, state: FSMContext) -> None:
-    """Обработчик выбора модели Flux 2 Flex после нажатия 'Создать'."""
-    try:
-        data = await state.get_data()
-        smart_merge_stage = data.get(SMART_MERGE_STAGE_KEY)
-        if smart_merge_stage:
-            logger.debug("handle_flux2flex_create: ignoring because smart_merge_stage is active")
-            return
-        
-        prompt = await _require_prompt(message, state)
-        if not prompt:
-            logger.warning("handle_flux2flex_create: prompt not found in state for user {}", 
-                          message.from_user.id if message.from_user else "unknown")
-            return
-        logger.info("handle_flux2flex_create: prompt found: '{}', saving selected_model='flux2flex-create'", prompt[:50])
-        await state.update_data(selected_model="flux2flex-create", prompt=prompt)
-        
-        format_hints = get_format_hints_text()
-        format_message = (
-            "Вы выбрали Flux 2 Flex. Выберите формат изображения:\n\n"
-            f"{format_hints}"
-        )
-        await message.answer(
-            format_message,
-            reply_markup=build_format_keyboard(),
-        )
-    except Exception as exc:
-        logger.error("Error in handle_flux2flex_create: {}", exc, exc_info=True)
-        await _send_error_notification(message, "handle_flux2flex_create")
-
-
 async def handle_gpt_create(message: types.Message, state: FSMContext) -> None:
     """Обработчик выбора модели Nano Banana Pro после нажатия 'Создать'."""
     try:
@@ -1639,15 +1509,11 @@ async def handle_format_choice(message: types.Message, state: FSMContext) -> Non
             if model_path == SMART_MERGE_PRO_MODEL:
                 model_for_format = "fal-ai/nano-banana-pro"
                 logger.info("handle_format_choice: detected Nano Banana Pro edit model")
-            # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-            # elif model_path == SMART_MERGE_FLUX2PRO_MODEL:
-            #     model_for_format = "fal-ai/flux-2-pro"
-            #     logger.info("handle_format_choice: detected Flux 2 Pro edit model")
             elif model_path == SMART_MERGE_DEFAULT_MODEL:
                 model_for_format = "fal-ai/nano-banana"
                 logger.info("handle_format_choice: detected Nano Banana edit model")
             elif model_path == SMART_MERGE_SEEDREAM_MODEL:
-                model_for_format = "fal-ai/bytedance/seedream/v4/edit"
+                model_for_format = settings.fal_seedream_edit_model
                 logger.info("handle_format_choice: detected Seedream edit model")
             else:
                 logger.warning("handle_format_choice: model_path='{}' is not supported for Smart Merge format selection", model_path)
@@ -1658,15 +1524,10 @@ async def handle_format_choice(message: types.Message, state: FSMContext) -> Non
             # Получаем параметры формата для модели
             format_spec = get_format_spec(format_id)
             format_params = get_model_format_mapping(model_for_format, format_id)
-            logger.info("handle_format_choice: Smart Merge - model_for_format='{}', format_id='{}', format_params={}", 
-                       model_for_format, format_id.value, format_params)
             
             # Определяем название модели для сообщения
             if model_path == SMART_MERGE_PRO_MODEL:
                 model_display_name = "Nano Banana Pro"
-            # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-            # elif model_path == SMART_MERGE_FLUX2PRO_MODEL:
-            #     model_display_name = "Flux 2 Pro"
             elif model_path == SMART_MERGE_DEFAULT_MODEL:
                 model_display_name = "Nano Banana"
             elif model_path == SMART_MERGE_SEEDREAM_MODEL:
@@ -1676,7 +1537,7 @@ async def handle_format_choice(message: types.Message, state: FSMContext) -> Non
             
             # Для всех моделей переходим к сбору изображений
             # Качество для Nano Banana Pro будет запрошено в конце, после ввода промпта и изображений
-            logger.info("handle_format_choice: going to collect stage for model {}, format_params={}", model_path, format_params)
+            logger.info("handle_format_choice: going to collect stage for model {}", model_path)
             await state.update_data(
                 {
                     SMART_MERGE_STAGE_KEY: "collect",
@@ -1685,10 +1546,6 @@ async def handle_format_choice(message: types.Message, state: FSMContext) -> Non
                     "selected_format": format_id.value,  # Сохраняем логический формат
                 }
             )
-            # Проверяем, что размеры сохранились
-            verify_data = await state.get_data()
-            saved_size = verify_data.get(SMART_MERGE_SIZE_KEY)
-            logger.info("handle_format_choice: Saved SMART_MERGE_SIZE_KEY={}, verify saved_size={}", format_params, saved_size)
             await message.answer(
                 f"Изменение активировано ({model_display_name} edit, {format_spec.label}).\n"
                     "Отправьте до 8 изображений (фото или документы). "
@@ -1967,14 +1824,6 @@ async def _enqueue_smart_merge_task(
     selected_model = data.get(SMART_MERGE_MODEL_KEY)
     selected_size = data.get(SMART_MERGE_SIZE_KEY)  # Размеры для Nano Banana Pro
     
-    # КРИТИЧЕСКИ ВАЖНО: Логируем что получили из state
-    logger.info("_enqueue_smart_merge_task: START - selected_model='{}', selected_size={}, data keys: {}", 
-               selected_model, selected_size, list(data.keys()))
-    
-    # Если selected_size пустой, это критическая ошибка!
-    if not selected_size:
-        logger.error("_enqueue_smart_merge_task: CRITICAL - selected_size is None or empty! data={}", data)
-    
     # Определяем, является ли это Nano Banana Pro для расчета цены
     is_nano_banana_pro_merge = (
         selected_model == SMART_MERGE_PRO_MODEL or 
@@ -1995,8 +1844,7 @@ async def _enqueue_smart_merge_task(
             # Get telegram user object if available
             telegram_user = message.from_user if hasattr(message, 'from_user') and message.from_user else None
             user, _ = BillingService.get_or_create_user(db, user_id, telegram_user)
-            price = get_operation_price("merge", model=selected_model, is_nano_banana_pro=is_nano_banana_pro_merge)
-            logger.info("_enqueue_smart_merge_task: calculated price={}₽ for merge operation with model='{}', is_nano_banana_pro={}", price, selected_model, is_nano_banana_pro_merge)
+            price = get_operation_price("merge", selected_model, is_nano_banana_pro_merge)
             
             # Get image count and prompt for statistics
             image_count = len(sources) if sources else None
@@ -2015,12 +1863,11 @@ async def _enqueue_smart_merge_task(
             )
             
             if not success:
-                balance_kopecks = BillingService.get_user_balance(db, user.id)
-                balance_rub = balance_kopecks / 100.0
+                balance = BillingService.get_user_balance(db, user.id)
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Изменение стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2044,37 +1891,20 @@ async def _enqueue_smart_merge_task(
         options_override = options_override or {}
         options_override["model"] = selected_model
     
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-    # # КРИТИЧЕСКИ ВАЖНО: Для Flux 2 Pro Edit сначала добавляем размеры в options_override
-    # # чтобы они попали в _build_smart_merge_base_options
-    # is_flux2pro = selected_model == SMART_MERGE_FLUX2PRO_MODEL or "flux-2-pro/edit" in (selected_model or "").lower()
-    
-    # Если размер выбран для модели, используем его
+    # Если размер выбран для Nano Banana Pro, используем его
     if selected_size and isinstance(selected_size, dict):
         if not options_override:
             options_override = {}
-        # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-        # # Для Flux 2 Pro Edit используем только width и height (не size и aspect_ratio)
-        # is_flux2pro = selected_model == SMART_MERGE_FLUX2PRO_MODEL or "flux-2-pro/edit" in (selected_model or "").lower()
-        # if is_flux2pro:
-        #     # Для Flux 2 Pro Edit передаем только width и height
-        #     if "width" in selected_size:
-        #         options_override["width"] = selected_size["width"]
-        #     if "height" in selected_size:
-        #         options_override["height"] = selected_size["height"]
-        #     logger.info("_enqueue_smart_merge_task: Flux 2 Pro Edit - using selected size from state: width={}, height={}", 
-        #                selected_size.get("width"), selected_size.get("height"))
-        else:
-            # Для других моделей передаем все параметры
-            if "size" in selected_size:
-                options_override["size"] = selected_size["size"]
-            if "aspect_ratio" in selected_size:
-                options_override["aspect_ratio"] = selected_size["aspect_ratio"]
-            if "width" in selected_size:
-                options_override["width"] = selected_size["width"]
-            if "height" in selected_size:
-                options_override["height"] = selected_size["height"]
-            logger.info("_enqueue_smart_merge_task: using selected size from state: {}", selected_size)
+        # Обновляем size, aspect_ratio, width, height из selected_size
+        if "size" in selected_size:
+            options_override["size"] = selected_size["size"]
+        if "aspect_ratio" in selected_size:
+            options_override["aspect_ratio"] = selected_size["aspect_ratio"]
+        if "width" in selected_size:
+            options_override["width"] = selected_size["width"]
+        if "height" in selected_size:
+            options_override["height"] = selected_size["height"]
+        logger.info("_enqueue_smart_merge_task: using selected size from state: {}", selected_size)
     
     # Для Nano Banana Pro edit используем оптимизированные параметры по умолчанию
     # (убрали выбор качества, используем параметры из режима "Качественнее", но немного сниженные)
@@ -2086,22 +1916,7 @@ async def _enqueue_smart_merge_task(
         options_override.setdefault("guidance_scale", 11.0)
         logger.info("_enqueue_smart_merge_task: using optimized default parameters for Nano Banana Pro edit: num_inference_steps=100, guidance_scale=11.0")
     
-    # Логируем options_override перед вызовом _build_smart_merge_base_options
-    logger.info("_enqueue_smart_merge_task: BEFORE _build_smart_merge_base_options - options_override keys: {}, width={}, height={}, model={}", 
-               list(options_override.keys()) if options_override else [], 
-               options_override.get("width") if options_override else None,
-               options_override.get("height") if options_override else None,
-               options_override.get("model") if options_override else None)
-    
     base_options = _build_smart_merge_base_options(options_override)
-    
-    # Логируем base_options после вызова _build_smart_merge_base_options
-    logger.info("_enqueue_smart_merge_task: AFTER _build_smart_merge_base_options - base_options keys: {}, width={}, height={}, model={}", 
-               list(base_options.keys()), 
-               base_options.get("width"),
-               base_options.get("height"),
-               base_options.get("model"))
-    
     options = _build_notify_options(message, prompt, base_options)
     
     # Передаем operation_id в options для worker
@@ -2109,19 +1924,13 @@ async def _enqueue_smart_merge_task(
         options["operation_id"] = operation_id
     
     # Проверяем, является ли модель Nano Banana или Nano Banana Pro (могут принимать русский текст)
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
     model = base_options.get("model") if base_options else None
     is_nano_banana = model == SMART_MERGE_DEFAULT_MODEL or model == "fal-ai/nano-banana" or model == "fal-ai/nano-banana/edit"
     is_nano_banana_pro = model == SMART_MERGE_PRO_MODEL or model == "fal-ai/nano-banana-pro" or model == "fal-ai/nano-banana-pro/edit"
-    # is_flux2pro = model == SMART_MERGE_FLUX2PRO_MODEL or model == "fal-ai/flux-2-pro/edit" or "flux-2-pro/edit" in (model or "").lower()
     
     # Переводим промпт только если это не Nano Banana и не Nano Banana Pro
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit
-    if is_nano_banana or is_nano_banana_pro:  # or is_flux2pro:
-        if is_nano_banana_pro:
-            model_name = "Nano Banana Pro"
-        else:
-            model_name = "Nano Banana"
+    if is_nano_banana or is_nano_banana_pro:
+        model_name = "Nano Banana Pro" if is_nano_banana_pro else "Nano Banana"
         logger.info("Smart merge: skipping translation for {} model, using original Russian prompt", model_name)
         provider_prompt = prompt  # Используем оригинальный русский промпт
     else:
@@ -2156,18 +1965,11 @@ async def _enqueue_smart_merge_task(
     )
     options["provider_prompt"] = enhanced_prompt
 
-    # КРИТИЧЕСКИ ВАЖНО: Логируем options перед передачей в enqueue_smart_merge
-    logger.info("_enqueue_smart_merge_task: FINAL options before enqueue_smart_merge - keys: {}, width={}, height={}, model={}", 
-               list(options.keys()), options.get("width"), options.get("height"), options.get("model"))
-    
     job_id, _ = enqueue_smart_merge(
         prompt=prompt,
         image_sources=sources[:SMART_MERGE_MAX_IMAGES],
         **options,
     )
-    
-    logger.info("_enqueue_smart_merge_task: Job {} enqueued with width={}, height={}", 
-               job_id, options.get("width"), options.get("height"))
     if message.chat:
         LAST_JOB_BY_CHAT[message.chat.id] = job_id
     logger.debug(
@@ -2314,8 +2116,8 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
     data = await state.get_data()
     
     logger.info("handle_prompt_input called: text='{}', user_id={}", text, message.from_user.id if message.from_user else "unknown")
-    logger.debug("handle_prompt_input: IMAGE_EDIT_CHRONO_BUTTON='{}', IMAGE_EDIT_SEDEDIT_BUTTON='{}', IMAGE_EDIT_FLUX2PRO_BUTTON='{}'", 
-                 IMAGE_EDIT_CHRONO_BUTTON, IMAGE_EDIT_SEDEDIT_BUTTON, IMAGE_EDIT_FLUX2PRO_BUTTON)
+    logger.debug("handle_prompt_input: IMAGE_EDIT_CHRONO_BUTTON='{}', IMAGE_EDIT_SEDEDIT_BUTTON='{}'", 
+                 IMAGE_EDIT_CHRONO_BUTTON, IMAGE_EDIT_SEDEDIT_BUTTON)
     
     # Проверяем, не является ли это кнопкой меню - если да, не обрабатываем
     text_lower = text.lower()
@@ -2344,9 +2146,8 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
     # Проверяем без учета регистра
     chrono_lower = IMAGE_EDIT_CHRONO_BUTTON.lower()
     seedream_lower = IMAGE_EDIT_SEDEDIT_BUTTON.lower()
-    flux2pro_lower = IMAGE_EDIT_FLUX2PRO_BUTTON.lower()
     
-    is_edit_button = (text_lower == chrono_lower or text_lower == seedream_lower or text_lower == flux2pro_lower)
+    is_edit_button = (text_lower == chrono_lower or text_lower == seedream_lower)
     
     logger.debug("handle_prompt_input: text_lower='{}', chrono_lower='{}', seedream_lower='{}', is_edit_button={}", 
                  text_lower, chrono_lower, seedream_lower, is_edit_button)
@@ -2383,7 +2184,7 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
         return
     
     # Игнорируем кнопки выбора модели - они обрабатываются своими handlers
-    if text == IMAGE_STANDARD_BUTTON or text == IMAGE_SEEDREAM_CREATE_BUTTON or text == IMAGE_GPT_CREATE_BUTTON or text == IMAGE_FLUX2FLEX_CREATE_BUTTON:
+    if text == IMAGE_STANDARD_BUTTON or text == IMAGE_SEEDREAM_CREATE_BUTTON or text == IMAGE_GPT_CREATE_BUTTON:
         return
     
     # Игнорируем кнопки выбора размера - они обрабатываются handle_size_choice
@@ -2459,7 +2260,6 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
         await message.answer(
             "⚠️ Пожалуйста, выберите модель из предложенных кнопок:\n\n"
             "• **Nano Banana Pro edit** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
-            "• **Flux 2 Pro edit** — production-ready модель, поддерживает русский язык, multi-reference editing\n"
             "• **Nano Banana edit** — топовая нейросеть, пишет только заголовки на кириллице\n"
             "• **Seedream edit** — качественная нейросеть, пишет текст только на английском языке",
             reply_markup=build_smart_merge_model_keyboard(),
@@ -2531,21 +2331,15 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
         # (убрали выбор качества, так как разница во времени генерации незначительна)
         else:
             # Для других моделей сразу запускаем задачу
-            try:
-                await _enqueue_smart_merge_task(
-                    message,
-                    state,
-                    prompt=prompt_text,
-                    sources=sources,
-                    options_override=override_options,
-                )
-                await state.clear()
-                return
-            except Exception as exc:
-                logger.error("Error in handle_prompt_input while enqueuing smart merge task: {}", exc, exc_info=True)
-                await _send_error_notification(message, "handle_prompt_input (smart merge)")
-                await state.clear()
-                return
+            await _enqueue_smart_merge_task(
+                message,
+                state,
+                prompt=prompt_text,
+                sources=sources,
+                options_override=override_options,
+            )
+            await state.clear()
+            return
     if smart_merge_stage:
         await message.answer(
             "Изменение уже активно. Опишите изменения текстом или нажмите «ℹ️ Info» для сброса.",
@@ -2617,11 +2411,10 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
                 list(saved_data.keys()) if saved_data else [])
     
     # Сразу показываем выбор моделей после принятия промпта
-    # Раскладка кнопок (2x2): Верхний ряд: Nano Banana Pro, Flux 2 Flex; Нижний ряд: Nano Banana, Seedream
+    # Порядок моделей (сверху вниз): 1. Nano Banana Pro, 2. Nano Banana, 3. Seedream
     await message.answer(
         "Промпт принят ✅.\nВыберите модель для создания изображения:\n"
         "• **Nano Banana Pro** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
-        "• **Flux 2 Flex** — современная модель с улучшенной типографикой и рендерингом текста\n"
         "• **Nano Banana** — топовая нейросеть, пишет только заголовки на кириллице\n"
         "• **Seedream** — качественная нейросеть, пишет текст только на английском языке",
         reply_markup=build_create_model_keyboard(),
@@ -2770,12 +2563,11 @@ async def handle_edit_media(message: types.Message, state: FSMContext) -> None:
             )
             
             if not success:
-                balance_kopecks = BillingService.get_user_balance(db, user.id)
-                balance_rub = balance_kopecks / 100.0
+                balance = BillingService.get_user_balance(db, user.id)
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2856,12 +2648,10 @@ async def handle_edit_media(message: types.Message, state: FSMContext) -> None:
             return
         
         # Определяем модель из state или используем модель по умолчанию
-        # Проверяем, была ли выбрана модель ранее (для Seedream, Chrono или Flux 2 Pro)
+        # Проверяем, была ли выбрана модель ранее (для Seedream или Chrono)
         selected_edit_model = data.get("selected_edit_model")  # Может быть установлено при выборе модели
-        if selected_edit_model == "seedream":
-            model_path = IMAGE_EDIT_ALT_MODEL
-        elif selected_edit_model == "flux2pro":
-            model_path = IMAGE_EDIT_FLUX2PRO_MODEL
+        if selected_edit_model:
+            model_path = IMAGE_EDIT_ALT_MODEL if selected_edit_model == "seedream" else IMAGE_EDIT_MODEL
         else:
             # Используем модель по умолчанию (Chrono Edit)
             model_path = IMAGE_EDIT_MODEL
@@ -2897,21 +2687,19 @@ async def handle_edit_model_choice(
         
         logger.info("handle_edit_model_choice called: selection='{}' (lower: '{}'), ignore_stage_check={}", 
                     selection, selection_lower, ignore_stage_check)
-        logger.info("handle_edit_model_choice: IMAGE_EDIT_CHRONO_BUTTON='{}' (lower: '{}'), IMAGE_EDIT_SEDEDIT_BUTTON='{}' (lower: '{}'), IMAGE_EDIT_FLUX2PRO_BUTTON='{}' (lower: '{}')", 
+        logger.info("handle_edit_model_choice: IMAGE_EDIT_CHRONO_BUTTON='{}' (lower: '{}'), IMAGE_EDIT_SEDEDIT_BUTTON='{}' (lower: '{}')", 
                     IMAGE_EDIT_CHRONO_BUTTON, IMAGE_EDIT_CHRONO_BUTTON.lower(), 
-                    IMAGE_EDIT_SEDEDIT_BUTTON, IMAGE_EDIT_SEDEDIT_BUTTON.lower(),
-                    IMAGE_EDIT_FLUX2PRO_BUTTON, IMAGE_EDIT_FLUX2PRO_BUTTON.lower())
+                    IMAGE_EDIT_SEDEDIT_BUTTON, IMAGE_EDIT_SEDEDIT_BUTTON.lower())
         
         # Проверяем совпадение без учета регистра
         is_chrono = selection_lower == IMAGE_EDIT_CHRONO_BUTTON.lower()
         is_seedream = selection_lower == IMAGE_EDIT_SEDEDIT_BUTTON.lower()
-        is_flux2pro = selection_lower == IMAGE_EDIT_FLUX2PRO_BUTTON.lower()
         
-        logger.info("handle_edit_model_choice: is_chrono={}, is_seedream={}, is_flux2pro={}", is_chrono, is_seedream, is_flux2pro)
+        logger.info("handle_edit_model_choice: is_chrono={}, is_seedream={}", is_chrono, is_seedream)
         
-        if not (is_chrono or is_seedream or is_flux2pro):
-            logger.warning("handle_edit_model_choice: selection '{}' (lower: '{}') does not match any edit model button. Chrono='{}', Seedream='{}', Flux2Pro='{}'", 
-                          selection, selection_lower, IMAGE_EDIT_CHRONO_BUTTON.lower(), IMAGE_EDIT_SEDEDIT_BUTTON.lower(), IMAGE_EDIT_FLUX2PRO_BUTTON.lower())
+        if not (is_chrono or is_seedream):
+            logger.warning("handle_edit_model_choice: selection '{}' (lower: '{}') does not match any edit model button. Chrono='{}', Seedream='{}'", 
+                          selection, selection_lower, IMAGE_EDIT_CHRONO_BUTTON.lower(), IMAGE_EDIT_SEDEDIT_BUTTON.lower())
             return
 
         current_stage = data.get(EDIT_STAGE_KEY)
@@ -2951,27 +2739,12 @@ async def handle_edit_model_choice(
             await state.clear()
             return
 
-        if is_chrono:
-            model_path = IMAGE_EDIT_MODEL
-            model_name = "Chrono Edit"
-            selected_edit_model = "chrono"
-        elif is_seedream:
-            model_path = IMAGE_EDIT_ALT_MODEL
-            model_name = "Seedream"
-            selected_edit_model = "seedream"
-        elif is_flux2pro:
-            model_path = IMAGE_EDIT_FLUX2PRO_MODEL
-            model_name = "Flux 2 Pro"
-            selected_edit_model = "flux2pro"
-        else:
-            model_path = IMAGE_EDIT_MODEL
-            model_name = "Chrono Edit"
-            selected_edit_model = "chrono"
-        
+        model_path = IMAGE_EDIT_MODEL if is_chrono else IMAGE_EDIT_ALT_MODEL
+        model_name = "Chrono Edit" if is_chrono else "Seedream"
         logger.info("handle_edit_model_choice: user selected {} model (path: {}). Starting edit task...", model_name, model_path)
         
         # Сохраняем выбранную модель в state для последующего использования
-        await state.update_data(selected_edit_model=selected_edit_model)
+        await state.update_data(selected_edit_model="seedream" if is_seedream else "chrono")
         
         await _enqueue_image_edit_task(
             message,
@@ -3061,13 +2834,11 @@ async def handle_smart_merge_model_choice(message: types.Message, state: FSMCont
         return
     
     # Только если мы в режиме Smart merge, проверяем текст кнопки
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-    if selection not in {IMAGE_SMART_MERGE_PRO_BUTTON, IMAGE_SMART_MERGE_NANO_BUTTON, IMAGE_SMART_MERGE_SEEDREAM_BUTTON}:  # IMAGE_SMART_MERGE_FLUX2PRO_BUTTON временно отключен
+    if selection not in {IMAGE_SMART_MERGE_PRO_BUTTON, IMAGE_SMART_MERGE_NANO_BUTTON, IMAGE_SMART_MERGE_SEEDREAM_BUTTON}:
         logger.info("handle_smart_merge_model_choice: user sent text '{}' instead of model button", selection)
         await message.answer(
             "⚠️ Пожалуйста, выберите модель для изменения из предложенных кнопок:\n\n"
             "• **Nano Banana Pro edit** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
-            "• **Flux 2 Pro edit** — production-ready модель, поддерживает русский язык\n"
             "• **Nano Banana edit** — топовая нейросеть, пишет только заголовки на кириллице\n"
             "• **Seedream edit** — качественная нейросеть, пишет текст только на английском языке",
             reply_markup=build_smart_merge_model_keyboard(),
@@ -3081,10 +2852,6 @@ async def handle_smart_merge_model_choice(message: types.Message, state: FSMCont
     if selection == IMAGE_SMART_MERGE_PRO_BUTTON:
         model_path = SMART_MERGE_PRO_MODEL
         model_name = "Nano Banana Pro"
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-    # elif selection == IMAGE_SMART_MERGE_FLUX2PRO_BUTTON:
-    #     model_path = SMART_MERGE_FLUX2PRO_MODEL
-    #     model_name = "Flux 2 Pro"
     elif selection == IMAGE_SMART_MERGE_NANO_BUTTON:
         model_path = SMART_MERGE_DEFAULT_MODEL
         model_name = "Nano Banana"
@@ -3285,12 +3052,11 @@ def register_image_handlers(dp: Dispatcher) -> None:
     
     # Регистрируем обработчики создания изображения ПОСЛЕДНИМИ, чтобы они проверялись ПЕРВЫМИ
     # Это гарантирует, что они имеют приоритет при обработке кнопок моделей после "Создать"
-    # Порядок моделей (приоритет): 1. Nano Banana Pro, 2. Flux 2 Flex, 3. Nano Banana, 4. Seedream
+    # Порядок моделей (приоритет): 1. Nano Banana Pro, 2. Nano Banana, 3. Seedream
     dp.message.register(handle_create, _match_button(CREATE_BUTTON))
     dp.message.register(handle_gpt_create, _match_button(IMAGE_GPT_CREATE_BUTTON))  # 1. Nano Banana Pro
-    dp.message.register(handle_flux2flex_create, _match_button(IMAGE_FLUX2FLEX_CREATE_BUTTON))  # 2. Flux 2 Flex
-    dp.message.register(handle_standard, _match_button(IMAGE_STANDARD_BUTTON))  # 3. Nano Banana
-    dp.message.register(handle_seedream_create, _match_button(IMAGE_SEEDREAM_CREATE_BUTTON))  # 4. Seedream
+    dp.message.register(handle_standard, _match_button(IMAGE_STANDARD_BUTTON))  # 2. Nano Banana
+    dp.message.register(handle_seedream_create, _match_button(IMAGE_SEEDREAM_CREATE_BUTTON))  # 3. Seedream
     
     # Обработчики редактирования регистрируем ПЕРЕД созданием,
     # чтобы они проверялись ПОСЛЕ создания (в обратном порядке)
@@ -3302,10 +3068,8 @@ def register_image_handlers(dp: Dispatcher) -> None:
     # handle_smart_merge_model_choice теперь сначала проверяет состояние, поэтому не блокирует другие обработчики
     dp.message.register(handle_smart_merge_start, _match_button(IMAGE_SMART_MERGE_BUTTON))
     dp.message.register(handle_smart_merge_model_choice, _match_button(IMAGE_SMART_MERGE_PRO_BUTTON))  # 1. Nano Banana Pro
-    # ВРЕМЕННО ОТКЛЮЧЕНО: Flux 2 Pro Edit - проблемы с размерами изображений
-    # dp.message.register(handle_smart_merge_model_choice, _match_button(IMAGE_SMART_MERGE_FLUX2PRO_BUTTON))  # 2. Flux 2 Pro
-    dp.message.register(handle_smart_merge_model_choice, _match_button(IMAGE_SMART_MERGE_NANO_BUTTON))  # 3. Nano Banana
-    dp.message.register(handle_smart_merge_model_choice, _match_button(IMAGE_SMART_MERGE_SEEDREAM_BUTTON))  # 4. Seedream
+    dp.message.register(handle_smart_merge_model_choice, _match_button(IMAGE_SMART_MERGE_NANO_BUTTON))  # 2. Nano Banana
+    dp.message.register(handle_smart_merge_model_choice, _match_button(IMAGE_SMART_MERGE_SEEDREAM_BUTTON))  # 3. Seedream
     # handle_edit_start removed from menu - button "Редактировать" is still available under generated images via callback
     dp.message.register(handle_retoucher_start, _match_button(IMAGE_RETOUCHER_BUTTON))
     dp.message.register(handle_upscale_button, _match_button(IMAGE_UPSCALE_BUTTON))
@@ -3356,4 +3120,3 @@ def register_image_handlers(dp: Dispatcher) -> None:
         return True
     
     dp.message.register(handle_prompt_input, prompt_input_filter)
-

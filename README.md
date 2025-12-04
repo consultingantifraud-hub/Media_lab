@@ -38,7 +38,7 @@
    - ✅ **Поддерживает русский язык** — промпт можно писать на русском без перевода
    - Высокое качество для детализированных изображений
    - Параметры: 50 шагов, guidance_scale 8.0
-3. **Seedream (Create)** (`fal-ai/bytedance/seedream/v4/text-to-image`) — топовая модель ByteDance
+3. **Seedream (Create)** (`fal-ai/bytedance/seedream/v4.5/text-to-image`) — топовая модель ByteDance
    - Отлично работает с текстом на изображениях
    - Промпт автоматически переводится на английский язык
 
@@ -100,7 +100,7 @@
   - ✅ **Поддерживает русский язык** — промпт можно писать на русском без перевода
   - Лучше работает с одним объектом и детальным промптом
   - Для нескольких объектов рекомендуется использовать Seedream
-- **Seedream** (`fal-ai/bytedance/seedream/v4/edit`) — лучше работает с людьми, добавляет объекты
+- **Seedream** (`fal-ai/bytedance/seedream/v4.5/edit`) — лучше работает с людьми, добавляет объекты
   - Промпт автоматически переводится на английский язык
   - Лучше работает с несколькими объектами и людьми
 
@@ -136,7 +136,7 @@
   - Сохраняет естественную текстуру и поры
   - Не изменяет структуру лица
   
-- **Усилить черты** (`fal-ai/bytedance/seedream/v4/edit`)
+- **Усилить черты** (`fal-ai/bytedance/seedream/v4.5/edit`)
   - Улучшает четкость черт лица и кожи
   - Слегка улучшает яркость глаз
   - Сохраняет структуру лица, пропорции и возраст
@@ -358,7 +358,7 @@ fal_inpaint_model=fal-ai/flux-general/inpainting
 fal_edit_model=fal-ai/chrono-edit
 fal_upscale_model=fal-ai/recraft/upscale/crisp
 fal_retoucher_model=fal-ai/retoucher
-fal_face_enhance_model=fal-ai/bytedance/seedream/v4/edit
+fal_face_enhance_model=fal-ai/bytedance/seedream/v4.5/edit
 fal_face_swap_model=fal-ai/face-swap
 wavespeed_api_key=YOUR_WAVESPEED_API_KEY  # Обязательно для WaveSpeed Face Swap
 wavespeed_face_swap_model=wavespeed-ai/image-face-swap  # Модель WaveSpeedAI для замены лица
@@ -863,7 +863,7 @@ cd /opt/media-lab/deploy
   - Упрощен процесс: выбор модели удален, сразу запрашиваются изображения
   - Улучшено качество: используется PNG формат вместо JPEG
 - ✅ **Обновлена ретушь "Усилить черты"**
-  - Модель: `fal-ai/bytedance/seedream/v4/edit` (Seedream Edit)
+  - Модель: `fal-ai/bytedance/seedream/v4.5/edit` (Seedream Edit)
   - Обновлен промпт: улучшение кожи и глаз без омоложения
   - **Губы не изменяются** — остаются без изменений
   - **Не добавляются новые объекты** — только улучшение существующих черт

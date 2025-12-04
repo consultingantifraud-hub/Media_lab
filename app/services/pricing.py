@@ -3,6 +3,8 @@ from typing import Dict, Optional, Tuple
 import os
 from loguru import logger
 
+from app.core.config import settings
+
 # Base prices from environment or defaults
 PRICE_NANO_BANANA_PRO = float(os.getenv("PRICE_NANO_BANANA_PRO", "26"))
 PRICE_FLUX2FLEX = float(os.getenv("PRICE_FLUX2FLEX", "12"))  # Цена для Flux 2 Flex
@@ -161,8 +163,10 @@ def _is_seedream_model(model: Optional[str]) -> bool:
     return (
         "seedream" in model_lower or
         "bytedance/seedream" in model_lower or
-        model == "fal-ai/bytedance/seedream/v4/text-to-image" or
-        model == "fal-ai/bytedance/seedream/v4/edit" or
+        model == "fal-ai/bytedance/seedream/v4/text-to-image" or  # Обратная совместимость
+        model == "fal-ai/bytedance/seedream/v4/edit" or  # Обратная совместимость
+        model == settings.fal_seedream_create_model or  # Текущая версия (v4.5)
+        model == settings.fal_seedream_edit_model or  # Текущая версия (v4.5)
         model == "seedream-create"
     )
 

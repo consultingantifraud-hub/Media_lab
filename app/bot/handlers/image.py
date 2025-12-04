@@ -261,7 +261,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
             "guidance_scale": 7.5,  # Оптимальное значение для естественных результатов (было 12.0 - вызывало переусиление)
             "num_inference_steps": 60,  # Оптимальное количество шагов для баланса качества и естественности (было 120 - вызывало артефакты)
             "enhance_prompt_mode": "fast",  # Быстрый режим для более естественной интерпретации промпта
-            "negative_prompt": "glowing eyes, unnatural colors, artifacts, distorted features, oversaturated, neon eyes, glowing effects, unrealistic lighting",  # Избегаем неестественных эффектов
+            "negative_prompt": "glowing eyes, neon eyes, glowing green eyes, unnatural eye colors, eye glow, glowing effects on eyes, artifacts, distorted features, oversaturated, unrealistic lighting, glowing skin, neon effects",  # Избегаем неестественных эффектов (усилено для предотвращения светящихся глаз)
             # Оптимизировано для предотвращения артефактов (зеленые светящиеся глаза и т.д.)
         },
         "sizes": {
@@ -1320,8 +1320,9 @@ async def handle_create(message: types.Message, state: FSMContext) -> None:
             await message.answer(
                 "Выберите модель для создания изображения:\n"
                 "• **Nano Banana Pro** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
+                "• **Flux 2 Flex** — быстрая и качественная нейросеть, поддерживает кириллицу\n"
                 "• **Nano Banana** — топовая нейросеть, пишет только заголовки на кириллице\n"
-                "• **Seedream** — качественная нейросеть, пишет текст только на английском языке",
+                "• **Seedream 4.5** — качественная нейросеть, пишет текст только на английском языке",
                 reply_markup=build_create_model_keyboard(),
                 parse_mode="Markdown",
             )
@@ -2416,8 +2417,9 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
     await message.answer(
         "Промпт принят ✅.\nВыберите модель для создания изображения:\n"
         "• **Nano Banana Pro** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
+        "• **Flux 2 Flex** — быстрая и качественная нейросеть, поддерживает кириллицу\n"
         "• **Nano Banana** — топовая нейросеть, пишет только заголовки на кириллице\n"
-        "• **Seedream** — качественная нейросеть, пишет текст только на английском языке",
+        "• **Seedream 4.5** — качественная нейросеть, пишет текст только на английском языке",
         reply_markup=build_create_model_keyboard(),
         parse_mode="Markdown",
     )

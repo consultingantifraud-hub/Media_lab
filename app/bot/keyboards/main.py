@@ -23,7 +23,7 @@ IMAGE_FACE_SWAP_ADVANCED_BUTTON = "🔄 WaveSpeed Face Swap"  # Высокое �
 
 # Кнопки выбора моделей для создания
 IMAGE_STANDARD_BUTTON = "Nano Banana"  # Используется для выбора модели после "Создать"
-IMAGE_SEEDREAM_CREATE_BUTTON = "Seedream"  # Используется для выбора модели после "Создать"
+IMAGE_SEEDREAM_CREATE_BUTTON = "Seedream 4.5"  # Используется для выбора модели после "Создать"
 IMAGE_GPT_CREATE_BUTTON = "Nano Banana Pro"  # Nano Banana Pro через Fal.ai - лучшее качество кириллицы
 IMAGE_FLUX2FLEX_CREATE_BUTTON = "Flux 2 Flex"  # Flux 2 Flex через Fal.ai
 

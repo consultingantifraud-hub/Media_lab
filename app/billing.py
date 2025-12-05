@@ -115,6 +115,19 @@ def build_balance_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def build_operations_history_keyboard() -> InlineKeyboardMarkup:
+    period_buttons = [
+        InlineKeyboardButton(text="📊 1 день", callback_data="operations_history_1"),
+        InlineKeyboardButton(text="📊 7 дней (Excel)", callback_data="operations_history_7"),
+        InlineKeyboardButton(text="📊 30 дней (Excel)", callback_data="operations_history_30"),
+    ]
+    keyboard_rows = [period_buttons]
+    keyboard_rows.append(
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="operations_back")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
 async def check_last_payment(message: Message):
     """Check status of last payment and update balance if needed."""
     from app.services.payment import PaymentService
@@ -964,8 +977,6 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
                 await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
                 await callback.answer()
             return
-        elif data == "operations_history_all":
-            days = None
         else:
             days = 1  # Default to 1 day
     
@@ -1190,8 +1201,7 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
                 if total_count > len(operations_to_show):
                     remaining = total_count - len(operations_to_show)
                     lines.append(f"\n... и еще {remaining} операций")
-                    if days == 1:
-                        lines.append("💡 Для полной выгрузки используйте Excel")
+                    lines.append("💡 Для полной выгрузки используйте кнопки «7 дней (Excel)» или «30 дней (Excel)»")
                 
                 text = "\n".join(lines)
         
@@ -1199,17 +1209,12 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
         keyboard_rows = []
         
         # Period filter buttons
-        period_buttons = []
-        if days != 1:
-            period_buttons.append(InlineKeyboardButton(text="📅 1 день", callback_data="operations_history_1"))
-        # 7 and 30 days will export to Excel
-        period_buttons.append(InlineKeyboardButton(text="📊 7 дней (Excel)", callback_data="operations_history_7"))
-        period_buttons.append(InlineKeyboardButton(text="📊 30 дней (Excel)", callback_data="operations_history_30"))
-        if days is not None:
-            period_buttons.append(InlineKeyboardButton(text="📅 Все", callback_data="operations_history_all"))
-        
-        if period_buttons:
-            keyboard_rows.append(period_buttons)
+        period_buttons = [
+            InlineKeyboardButton(text="📊 1 день", callback_data="operations_history_1"),
+            InlineKeyboardButton(text="📊 7 дней (Excel)", callback_data="operations_history_7"),
+            InlineKeyboardButton(text="📊 30 дней (Excel)", callback_data="operations_history_30"),
+        ]
+        keyboard_rows.append(period_buttons)
         
         # Back button
         keyboard_rows.append([
@@ -1220,6 +1225,7 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
         ])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+        logger.info("HISTORY KB ROWS: %s", [[btn.text for btn in row] for row in keyboard.inline_keyboard])
         
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
         await callback.answer()

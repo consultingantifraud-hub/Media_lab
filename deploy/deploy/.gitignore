@@ -1,5 +1,0 @@
-# Игнорировать файлы с учетными данными
-server-credentials.json
-*.key
-*.pem
-

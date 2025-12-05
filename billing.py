@@ -18,6 +18,11 @@ class BillingService:
     """Service for managing billing operations."""
 
     @staticmethod
+    def _normalize_is_premium(value: Optional[bool]) -> bool:
+        """Ensure is_premium is never None (None -> False)."""
+        return bool(value) if value is not None else False
+
+    @staticmethod
     def get_or_create_user(
         db: Session, 
         telegram_id: int,
@@ -37,6 +42,14 @@ class BillingService:
         user = db.query(User).filter(User.telegram_id == telegram_id).first()
         is_new = False
         
+        # Normalize legacy nullable fields (always enforce bool)
+        if user:
+            normalized_existing = BillingService._normalize_is_premium(user.is_premium)
+            if user.is_premium != normalized_existing:
+                user.is_premium = normalized_existing
+                db.commit()
+                db.refresh(user)
+
         # Update user profile if telegram_user is provided
         if telegram_user and user:
             updated = False
@@ -53,20 +66,39 @@ class BillingService:
             if hasattr(telegram_user, 'language_code') and telegram_user.language_code != user.language_code:
                 user.language_code = telegram_user.language_code
                 updated = True
-            if hasattr(telegram_user, 'is_premium') and telegram_user.is_premium != user.is_premium:
-                user.is_premium = telegram_user.is_premium
+            incoming_premium = getattr(telegram_user, "is_premium", user.is_premium)
+            normalized_premium = BillingService._normalize_is_premium(incoming_premium)
+            if normalized_premium != user.is_premium:
+                user.is_premium = normalized_premium
                 updated = True
             if updated:
                 from datetime import datetime, timezone
                 user.last_activity_at = datetime.now(timezone.utc)
+                logger.info(
+                    "USER UPDATE: id=%s, is_premium=%s, last_activity_at=%s",
+                    user.id,
+                    user.is_premium,
+                    user.last_activity_at,
+                )
                 db.commit()
                 logger.debug(f"Updated user profile: telegram_id={telegram_id}")
+
+        # Final guard: ensure is_premium is always boolean before returning
+        if user:
+            normalized_final = BillingService._normalize_is_premium(user.is_premium)
+            if user.is_premium != normalized_final:
+                user.is_premium = normalized_final
+                db.commit()
+                db.refresh(user)
         
         if not user:
             # Create new user with starting balance of 30 rubles
             user_data = {
                 "telegram_id": telegram_id,
-                "free_operations_left": 0
+                "free_operations_left": 0,
+                "is_premium": BillingService._normalize_is_premium(
+                    getattr(telegram_user, "is_premium", None) if telegram_user else False
+                ),
             }
             
             # Add Telegram profile information if available
@@ -79,8 +111,9 @@ class BillingService:
                     user_data["last_name"] = telegram_user.last_name
                 if hasattr(telegram_user, 'language_code'):
                     user_data["language_code"] = telegram_user.language_code
-                if hasattr(telegram_user, 'is_premium'):
-                    user_data["is_premium"] = telegram_user.is_premium
+                user_data["is_premium"] = BillingService._normalize_is_premium(
+                    getattr(telegram_user, "is_premium", user_data["is_premium"])
+                )
                 from datetime import datetime, timezone
                 user_data["last_activity_at"] = datetime.now(timezone.utc)
             

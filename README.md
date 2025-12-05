@@ -30,7 +30,7 @@
 ### 🎨 **Создать** — Генерация изображений из текста
 
 **Модели (в порядке приоритета):**
-1. **Nano Banana Pro** (`fal-ai/gpt-image-1-mini/edit`) — лучшее качество кириллицы
+1. **Nano Banana Pro** (`fal-ai/nano-banana-pro`) — лучшее качество кириллицы
    - ✅ **Поддерживает русский язык** — промпт можно писать на русском без перевода
    - Максимальное качество для детализированных изображений
    - Параметры: 50 шагов, guidance_scale 8.0
@@ -359,9 +359,14 @@ fal_edit_model=fal-ai/chrono-edit
 fal_upscale_model=fal-ai/recraft/upscale/crisp
 fal_retoucher_model=fal-ai/retoucher
 fal_face_enhance_model=fal-ai/bytedance/seedream/v4.5/edit
-fal_face_swap_model=fal-ai/face-swap
 wavespeed_api_key=YOUR_WAVESPEED_API_KEY  # Обязательно для WaveSpeed Face Swap
 wavespeed_face_swap_model=wavespeed-ai/image-face-swap  # Модель WaveSpeedAI для замены лица
+fal_seedream_edit_model=fal-ai/bytedance/seedream/v4.5/edit
+fal_seedream_create_model=fal-ai/bytedance/seedream/v4.5/text-to-image
+fal_flux2flex_model=fal-ai/flux-2-flex
+fal_nano_banana_edit_model=fal-ai/nano-banana/edit
+fal_nano_banana_pro_model=fal-ai/nano-banana-pro
+fal_nano_banana_pro_edit_model=fal-ai/nano-banana-pro/edit
 video_poll_interval=5
 video_max_wait_sec=900
 media_dir=./media
@@ -371,6 +376,12 @@ DATABASE_URL=sqlite:////tmp/media_lab_shared.db  # Общий файл БД дл
 **Важно для production:**
 - `WAVESPEED_API_KEY` — обязателен для работы Face Swap (используется только WaveSpeed модель)
 - `DATABASE_URL` — должен указывать на общий файл для синхронизации между контейнерами
+
+**Модели и env-переменные:**
+- `fal_seedream_edit_model` / `fal_seedream_create_model` управляют Seedream Create/Edit.
+- `fal_flux2flex_model` отвечает за Flux 2 Flex.
+- `fal_premium_model` / `fal_nano_banana_edit_model` — Nano Banana Create и edit.
+- `fal_nano_banana_pro_model` / `fal_nano_banana_pro_edit_model` — Nano Banana Pro Create и Smart Merge Pro.
 
 ### 2. Redis и воркеры (Docker)
 
@@ -753,6 +764,167 @@ cd /opt/media-lab/deploy
 ```
 
 ---
+## 🏗️ Продовая инфраструктура
+
+- **Compose-проект:** `deploy`
+- **Рабочая директория:** `/opt/media-lab/deploy`
+- **Файл:** `docker-compose.prod.yml`
+- **env_file** у сервисов `bot`, `api` и всех `worker-image*` указывает на `../.env`, то есть получается `/opt/media-lab/.env`
+- **Сервисы:** `redis`, `postgres`, `api`, `bot`, `worker-image`, `worker-image-2`, …, `worker-image-16`
+- `worker-image[1–16]` — 16 независимых контейнеров для параллельной генерации (все слушают очередь `img_queue`)
+ - **Где живут модели:**  `/opt/media-lab/.env`, в котором хранятся переменные, импортируемые в `app/core/config.py`.
+
+## 🗂️ Структура проекта и назначение директорий (продовая инвентаризация)
+
+---
+
+### 📌 Директории, которые используются продовым сервисом
+
+**/opt/media-lab/deploy/**
+
+- Рабочая директория продового docker-compose (`docker-compose.prod.yml`).
+- Запускает: `bot`, `api`, `redis`, `postgres`, `worker-image-1`…`worker-image-16`.
+- `env_file` указывает на `../.env` → фактический runtime-файл `/opt/media-lab/.env`.
+
+**/opt/media-lab/.env**
+
+- Главный конфигурационный файл.
+- Хранит все переменные моделей (Seedream, Flux, Nano Banana, Nano Banana Pro и другие).
+- Используется контейнерами во время исполнения.
+
+**/opt/media-lab/app/**
+
+- Основной Python-код сервиса: бот, провайдеры, воркеры.
+- Это код, который реально выполняется в проде.
+
+**/opt/media-lab/media/**
+
+- Хранилище изображений и результатов генерации (`images/`, `edits/`, `face_swap/`, `videos/` и др.).
+
+**/opt/media-lab/logs/**
+
+- Логи PostgreSQL, воркеров, cleanup-скриптов и вспомогательных операций.
+
+---
+
+### 📌 Директории, которые «возможно нужны»
+
+**/opt/media-lab/docker/**
+
+- Набор Dockerfile'ов и старых compose-конфигураций.
+- Содержит Windows-скрипты (`*.ps1`/`*.bat`) и технические утилиты.
+- Используется редко, но может быть полезно как «dev legacy».
+
+**/opt/media-lab/docker-compose.yml (root)**
+
+- Базовый compose для dev-режима.
+- Прод использует только `deploy/docker-compose.prod.yml`.
+
+**/opt/media-lab/scripts/**
+
+- Различные вспомогательные утилиты (`add_balance`, экспорт статистики, прочие скрипты).
+- Могут использоваться вручную для администрирования и тестов.
+
+---
+
+### 📌 Директории и файлы, которые выглядят устаревшими (НЕ удаляем, только отмечаем)
+
+**deploy/deploy/**
+
+- Похоже на старый набор деплой-скриптов.
+- Реальный прод использует директорию `deploy/` напрямую.
+
+**deploy/=2.9.0, deploy/=2.0.0 и подобные**
+
+- Архивы/кэш старых релизов.
+- Не участвуют в запуске текущего прод-стека.
+
+**app/workers/image_worker.py.backup\***
+
+- Исторические версии worker-кода.
+- В проде используется только актуальный `worker-image` контейнер.
+
+**.cursor/**
+
+- Вспомогательная директория редактора Cursor. Не используется сервисом.
+
+**Разрозненные top-level утилиты (например: `create_promo_codes.py`, `fix_image.py`, `jobs.py`)**
+
+- Вероятно нуждаются в ревизии как «ручные админ-скрипты», но не используются контейнерами.
+
+**docker/*.ps1 и *.bat**
+
+- Windows-скрипты миграции/поднятия окружения — на Linux-сервере не применяются.
+
+---
+
+### 📌 Вывод по инвентаризации
+
+1. Продовый сервис опирается ТОЛЬКО на:
+   - `/opt/media-lab/deploy/docker-compose.prod.yml`
+   - `/opt/media-lab/.env`
+   - `/opt/media-lab/app/`
+
+2. Всё остальное — либо dev-инструменты, либо устаревшие версии, либо резервные копии.
+
+3. Перед любой очисткой рекомендуется:
+   - собрать список кандидатов на удаление;
+   - выполнить архивирование;
+   - убедиться, что файлы не нужны CI/CD или ручным скриптам.
+
+---
+
+## 🧠 Централизация моделей
+
+- Все ключевые модели читаются из `app/core/config.py` → `Settings` и не захардкожены в логике (кроме бэкомпат-веток в детекторах).  
+- Текущие переменные и значения:
+  - `fal_seedream_create_model = fal-ai/bytedance/seedream/v4.5/text-to-image` (создание Seedream)
+  - `fal_seedream_edit_model = fal-ai/bytedance/seedream/v4.5/edit` (редактирование/ретушь Seedream)
+  - `fal_flux2flex_model = fal-ai/flux-2-flex` (Flux 2 Flex генерация)
+  - `fal_premium_model = fal-ai/nano-banana` (Nano Banana создание)
+  - `fal_nano_banana_edit_model = fal-ai/nano-banana/edit` (Nano Banana edit для Smart Merge)
+  - `fal_nano_banana_pro_model = fal-ai/nano-banana-pro` (Nano Banana Pro создание)
+  - `fal_nano_banana_pro_edit_model = fal-ai/nano-banana-pro/edit` (Nano Banana Pro edit / Smart Merge Pro)
+
+### Какая операция за что отвечает
+
+- **Создать (Nano Banana Pro)** → `fal_nano_banana_pro_model` – высокое качество и кириллицу поддерживает.
+- **Smart Merge Pro / Smart Merge Pro edit** → `fal_nano_banana_pro_edit_model` – обработка Nano Banana Pro edit.
+- **Создать (Nano Banana)** → `fal_premium_model` – стандартная модель Nano Banana.
+- **Smart Merge Nano Banana / Nano Banana Edit** → `fal_nano_banana_edit_model`.
+- **Seedream Create/Edit** → `fal_seedream_create_model`, `fal_seedream_edit_model`.
+- **Flux 2 Flex** → `fal_flux2flex_model`.
+
+### Как обновить модель без правки кода
+
+1. Измените нужную переменную в `/opt/media-lab/.env`.
+2. На сервере выполните:
+   ```bash
+   cd /opt/media-lab/deploy
+   docker compose -f docker-compose.prod.yml up -d bot api worker-image worker-image-2 worker-image-3 worker-image-4 worker-image-5 worker-image-6 worker-image-7 worker-image-8 worker-image-9 worker-image-10 worker-image-11 worker-image-12 worker-image-13 worker-image-14 worker-image-15 worker-image-16
+   ```
+3. Проверьте значения в контейнере:
+   ```bash
+   docker exec deploy-bot-1 python -c "from app.core.config import settings; print(settings.fal_nano_banana_pro_model, settings.fal_nano_banana_pro_edit_model)"
+   ```
+4. Логи бота и воркеров (`docker logs deploy-bot-1`, `docker logs deploy-worker-image-*`) покажут, что запросы уходят с новыми ID.
+## 🔧 Конфигурация Seedream
+
+- Модели Seedream настраиваются через переменные окружения:
+  - `fal_seedream_edit_model`
+  - `fal_seedream_create_model`
+- По умолчанию значения:
+  - `fal_seedream_edit_model=fal-ai/bytedance/seedream/v4.5/edit`
+  - `fal_seedream_create_model=fal-ai/bytedance/seedream/v4.5/text-to-image`
+- Эти переменные инициализируются из `/opt/media-lab/.env`, затем `settings.fal_seedream_*` читают их в `deploy-bot-1`. Логи подтверждают, что запросы идут на Fal.ai `…/seedream/v4.5/...` и старые `v4` больше не используются.
+- Чтобы обновить версию Seedream:
+  1. Отредактируйте `/opt/media-lab/.env`, поменяйте значения `fal_seedream_edit_model` и `fal_seedream_create_model`.
+  2. На сервере выполните:
+     ```bash
+     cd /opt/media-lab/deploy
+     docker compose -f docker-compose.prod.yml up -d bot api worker-image worker-image-2 worker-image-3 worker-image-4 worker-image-5 worker-image-6 worker-image-7 worker-image-8 worker-image-9 worker-image-10 worker-image-11 worker-image-12 worker-image-13 worker-image-14 worker-image-15 worker-image-16
+     ```
+  - После `up -d` новые переменные подхватятся автоматически, переписывать код не нужно.
 
 ## 📝 История изменений
 

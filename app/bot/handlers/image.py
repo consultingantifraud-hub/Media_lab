@@ -69,6 +69,7 @@ from app.core.queues import get_job
 from app.core.storage import storage
 from app.providers.fal.client import download_file
 from app.providers.fal.models_map import resolve_alias, model_requires_mask
+from app.services.pricing import _is_seedream_model
 from app.utils.translation import translate_to_english
 
 
@@ -165,8 +166,8 @@ SMART_MERGE_STAGE_KEY = "smart_merge_stage"
 SMART_MERGE_SOURCES_KEY = "smart_merge_sources"
 SMART_MERGE_MODEL_KEY = "smart_merge_model"
 SMART_MERGE_SIZE_KEY = "smart_merge_size"  # Ключ для хранения выбранного размера
-SMART_MERGE_PRO_MODEL = "fal-ai/nano-banana-pro/edit"
-SMART_MERGE_DEFAULT_MODEL = "fal-ai/nano-banana/edit"
+SMART_MERGE_PRO_MODEL = settings.fal_nano_banana_pro_edit_model
+SMART_MERGE_DEFAULT_MODEL = settings.fal_nano_banana_edit_model
 SMART_MERGE_SEEDREAM_MODEL = settings.fal_seedream_edit_model  # Seedream 4.5 edit
 SMART_MERGE_DEFAULT_SIZE = "1024x1024"
 SMART_MERGE_DEFAULT_ASPECT_RATIO = "1:1"
@@ -251,7 +252,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
     },
     "seedream-create": {
         "label": "изображение",
-        "model": "fal-ai/bytedance/seedream/v4/text-to-image",  # Модель для создания без входного изображения
+        "model": settings.fal_seedream_create_model,  # Модель для создания без входного изображения
         "base": {
             "output_format": "png",
             "guidance_scale": 12.0,  # Увеличено для максимального качества и детализации
@@ -268,7 +269,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
     },
     "gpt-create": {
         "label": "изображение",
-        "model": "fal-ai/nano-banana-pro",  # Nano Banana Pro через Fal.ai
+        "model": settings.fal_nano_banana_pro_model,  # Nano Banana Pro через Fal.ai
         "base": {
             "num_inference_steps": 90,  # Максимальная прорисовка (больше шагов = лучше детализация)
             "guidance_scale": 10.0,  # Максимальное соответствие промпту и качество
@@ -283,7 +284,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
     },
     "flux2flex-create": {
         "label": "изображение",
-        "model": "fal-ai/flux-2-flex",  # Flux 2 Flex через Fal.ai
+        "model": settings.fal_flux2flex_model,  # Flux 2 Flex через Fal.ai
         "base": {
             "output_format": "png",
         },
@@ -552,7 +553,7 @@ async def _enqueue_image_edit_task(
     
     # Определяем модель для выбора стратегии обработки промпта
     model_name = base_payload.get("model", IMAGE_EDIT_MODEL)
-    is_seedream = "seedream" in model_name.lower()
+    is_seedream = _is_seedream_model(model_name)
     
     options = _build_notify_options(message, prompt, base_payload)
     logger.info("_enqueue_image_edit_task: calling translate_to_english in executor")
@@ -1549,10 +1550,10 @@ async def handle_format_choice(message: types.Message, state: FSMContext) -> Non
             # Определяем модель для получения параметров формата
             logger.info("handle_format_choice: model_path='{}', SMART_MERGE_PRO_MODEL='{}'", model_path, SMART_MERGE_PRO_MODEL)
             if model_path == SMART_MERGE_PRO_MODEL:
-                model_for_format = "fal-ai/nano-banana-pro"
+                model_for_format = settings.fal_nano_banana_pro_model
                 logger.info("handle_format_choice: detected Nano Banana Pro edit model")
             elif model_path == SMART_MERGE_DEFAULT_MODEL:
-                model_for_format = "fal-ai/nano-banana"
+                model_for_format = settings.fal_premium_model
                 logger.info("handle_format_choice: detected Nano Banana edit model")
             elif model_path == SMART_MERGE_SEEDREAM_MODEL:
                 model_for_format = settings.fal_seedream_edit_model  # Seedream 4.5 edit
@@ -1967,8 +1968,13 @@ async def _enqueue_smart_merge_task(
     
     # Проверяем, является ли модель Nano Banana или Nano Banana Pro (могут принимать русский текст)
     model = base_options.get("model") if base_options else None
-    is_nano_banana = model == SMART_MERGE_DEFAULT_MODEL or model == "fal-ai/nano-banana" or model == "fal-ai/nano-banana/edit"
-    is_nano_banana_pro = model == SMART_MERGE_PRO_MODEL or model == "fal-ai/nano-banana-pro" or model == "fal-ai/nano-banana-pro/edit"
+    is_nano_banana = model == SMART_MERGE_DEFAULT_MODEL or model == settings.fal_premium_model or model == "fal-ai/nano-banana/edit"
+    is_nano_banana_pro = (
+        model == SMART_MERGE_PRO_MODEL or
+        model == settings.fal_nano_banana_pro_model or
+        model == "fal-ai/nano-banana-pro" or
+        model == "fal-ai/nano-banana-pro/edit"
+    )
     
     # Переводим промпт только если это не Nano Banana и не Nano Banana Pro
     if is_nano_banana or is_nano_banana_pro:

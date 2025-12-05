@@ -6,6 +6,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from loguru import logger
+from app.billing import build_operations_history_keyboard
 
 from app.services.billing import BillingService, get_user_info
 from app.services.payment import PaymentService, create_payment
@@ -114,6 +115,14 @@ def build_balance_keyboard() -> InlineKeyboardMarkup:
             )
         ]
     ])
+
+
+def log_history_keyboard(callback: CallbackQuery, keyboard: InlineKeyboardMarkup, source: str = "unknown") -> None:
+    logger.info(
+        "HISTORY KB ROWS (from %s): %s",
+        callback.data if hasattr(callback, "data") else source,
+        [[btn.text for btn in row] for row in keyboard.inline_keyboard],
+    )
 
 
 async def check_last_payment(message: Message):
@@ -1047,44 +1056,49 @@ async def export_operations_to_excel(callback: CallbackQuery, days: int) -> None
 
 @router.callback_query(F.data == "operations_history")
 async def callback_operations_history(callback: CallbackQuery, state: FSMContext):
-    """Show operations history (default: 1 day)."""
-    await callback_operations_history_with_filter(callback, state, days=1)
+    keyboard = build_operations_history_keyboard()
+    log_history_keyboard(callback, keyboard, source="operations_history")
+    await callback.message.edit_text(
+        "📊 Выберите период для просмотра истории операций:",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("operations_history_"))
 async def callback_operations_history_with_filter(callback: CallbackQuery, state: FSMContext, days: Optional[int] = None):
-    """Show operations history with optional date filter."""
-    # Parse days from callback data if not provided
-    if days is None:
-        data = callback.data
-        if data == "operations_history_1":
-            days = 1
-        elif data == "operations_history_7":
-            # Export to Excel for 7 days
-            logger.info(f"Exporting operations for 7 days for user {callback.from_user.id}")
-            try:
-                await callback.answer("📊 Формирую выгрузку за 7 дней...")
-                await export_operations_to_excel(callback, 7)
-            except Exception as e:
-                logger.error(f"Error exporting operations for 7 days: {e}", exc_info=True)
-                await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
-                await callback.answer()
-            return
-        elif data == "operations_history_30":
-            # Export to Excel for 30 days
-            logger.info(f"Exporting operations for 30 days for user {callback.from_user.id}")
-            try:
-                await callback.answer("📊 Формирую выгрузку за 30 дней...")
-                await export_operations_to_excel(callback, 30)
-            except Exception as e:
-                logger.error(f"Error exporting operations for 30 days: {e}", exc_info=True)
-                await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
-                await callback.answer()
-            return
-        elif data == "operations_history_all":
-            days = None
-        else:
-            days = 1  # Default to 1 day
+    data = callback.data
+    if data == "operations_history_1":
+        days = 1
+    elif data == "operations_history_7":
+        logger.info(f"Exporting operations for 7 days for user {callback.from_user.id}")
+        try:
+            await callback.answer("📊 Формирую выгрузку за 7 дней...")
+            await export_operations_to_excel(callback, 7)
+        except Exception as e:
+            logger.error(f"Error exporting operations for 7 days: {e}", exc_info=True)
+            await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
+            await callback.answer()
+        keyboard = build_operations_history_keyboard()
+        log_history_keyboard(callback, keyboard, source="operations_history_7")
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        return
+    elif data == "operations_history_30":
+        logger.info(f"Exporting operations for 30 days for user {callback.from_user.id}")
+        try:
+            await callback.answer("📊 Формирую выгрузку за 30 дней...")
+            await export_operations_to_excel(callback, 30)
+        except Exception as e:
+            logger.error(f"Error exporting operations for 30 days: {e}", exc_info=True)
+            await callback.message.answer("❌ Произошла ошибка при формировании выгрузки.")
+            await callback.answer()
+        keyboard = build_operations_history_keyboard()
+        log_history_keyboard(callback, keyboard, source="operations_history_30")
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        return
+    else:
+        days = 1  # Default to 1 day
     
     db = SessionLocal()
     try:
@@ -1243,11 +1257,8 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
         displayed_count = len(operations_to_show)
         if total_count > displayed_count:
             remaining = total_count - displayed_count
-            if days == 1:
-                lines.append(f"\n... и еще {remaining} операций")
-                lines.append("💡 Для полной выгрузки используйте кнопки «7 дней (Excel)» или «30 дней (Excel)»")
-            elif days is None:
-                lines.append(f"\n... и еще {remaining} операций")
+            lines.append(f"\n... и еще {remaining} операций")
+            lines.append("💡 Для полной выгрузки используйте кнопки «7 дней (Excel)» или «30 дней (Excel)»")
         
         text = "\n".join(lines)
         
@@ -1312,36 +1323,29 @@ async def callback_operations_history_with_filter(callback: CallbackQuery, state
                 
                 text = "\n".join(lines)
         
-        # Add period filter buttons
-        keyboard_rows = []
-        
-        # Period filter buttons
-        period_buttons = []
-        if days != 1:
-            period_buttons.append(InlineKeyboardButton(text="📅 1 день", callback_data="operations_history_1"))
-        # 7 and 30 days will export to Excel
-        period_buttons.append(InlineKeyboardButton(text="📊 7 дней (Excel)", callback_data="operations_history_7"))
-        period_buttons.append(InlineKeyboardButton(text="📊 30 дней (Excel)", callback_data="operations_history_30"))
-        if days is not None:
-            period_buttons.append(InlineKeyboardButton(text="📅 Все", callback_data="operations_history_all"))
-        
-        if period_buttons:
-            keyboard_rows.append(period_buttons)
-        
-        # Back button
-        keyboard_rows.append([
-            InlineKeyboardButton(
-                text="↩️ Назад",
-                callback_data="payment_menu"
-            )
-        ])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
-        
+        keyboard = build_operations_history_keyboard()
+        log_history_keyboard(callback, keyboard, source=f"operations_history_{days}")
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
         await callback.answer()
     finally:
         db.close()
+
+
+@router.callback_query(F.data == "operations_history_all")
+async def legacy_operations_history_all(callback: CallbackQuery):
+    """
+    Легаси-обработчик для старых кнопок 'Все' (operations_history_all).
+    Новые клавиатуры эту кнопку не создают, но старые сообщения продолжают слать этот callback.
+    Просто показываем новое меню выбора периода.
+    """
+    keyboard = build_operations_history_keyboard()
+    log_history_keyboard(callback, keyboard, source="operations_history_all_legacy")
+    await callback.message.edit_text(
+        "📊 Выберите период для просмотра истории операций:",
+        reply_markup=keyboard,
+        parse_mode="Markdown",
+    )
+    await callback.answer()
 
 
 def check_balance_decorator(operation_type: str):

@@ -1,5 +1,5 @@
 """Database models for Media Lab Bot."""
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -32,7 +32,7 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(Integer, unique=True, index=True, nullable=False)
+    telegram_id = Column(BigInteger, unique=True, index=True, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     free_operations_left = Column(Integer, default=0, nullable=False)

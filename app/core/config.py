@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     fal_queue_base_url: str = "https://queue.fal.run"
     fal_standard_model: str = "fal-ai/flux-pro/v1.1-ultra"
     fal_premium_model: str = "fal-ai/nano-banana"
+    fal_nano_banana_pro_model: str = "fal-ai/nano-banana-pro"
+    fal_nano_banana_edit_model: str = "fal-ai/nano-banana/edit"
+    fal_nano_banana_pro_edit_model: str = "fal-ai/nano-banana-pro/edit"
     fal_inpaint_model: str = "fal-ai/flux-general/inpainting"
     fal_edit_model: str = "fal-ai/chrono-edit"
     fal_upscale_model: str = "fal-ai/recraft/upscale/crisp"
@@ -28,6 +31,8 @@ class Settings(BaseSettings):
     # Настройки для Seedream
     fal_seedream_edit_model: str = Field(default="fal-ai/bytedance/seedream/v4.5/edit")
     fal_seedream_create_model: str = Field(default="fal-ai/bytedance/seedream/v4.5/text-to-image")
+    # Настройки для Flux 2 Flex
+    fal_flux2flex_model: str = "fal-ai/flux-2-flex"
     # Настройки для WaveSpeedAI
     wavespeed_api_key: str | None = None  # API ключ WaveSpeedAI (обязательно для WaveSpeed Face Swap - высокое качество)
     wavespeed_face_swap_model: str = "wavespeed-ai/image-face-swap"  # Модель для face swap на WaveSpeedAI

@@ -55,10 +55,10 @@ MODEL_COSTS_USD = {
     "fal-ai/nano-banana/edit": 0.0398,
     "fal-ai/flux-2-flex": 0.06,  # Flux 2 Flex - 6 центов за операцию
     "fal-ai/flux-2-pro/edit": 0.10,  # Flux 2 Pro Edit - примерная стоимость (временно отключена, но может быть в старых данных)
-    "fal-ai/bytedance/seedream/v4/edit": 0.03,  # Обратная совместимость
-    "fal-ai/bytedance/seedream/v4/text-to-image": 0.03,  # Обратная совместимость
-    settings.fal_seedream_edit_model: 0.03,  # Текущая версия (v4.5)
-    settings.fal_seedream_create_model: 0.03,  # Текущая версия (v4.5)
+    "fal-ai/bytedance/seedream/v4/edit": 0.04,  # Обратная совместимость
+    "fal-ai/bytedance/seedream/v4/text-to-image": 0.04,  # Обратная совместимость
+    settings.fal_seedream_edit_model: 0.04,  # Текущая версия (v4.5)
+    settings.fal_seedream_create_model: 0.04,  # Текущая версия (v4.5)
     "fal-ai/any-llm": 0.001,
     "fal-ai/recraft/upscale/crisp": 0.004,
     "fal-ai/retoucher": 0.0013,
@@ -74,7 +74,7 @@ def get_model_by_operation_type(operation_type: str) -> str | None:
     # Маппинг типов операций на модели по умолчанию
     operation_to_model = {
         "upscale": "fal-ai/recraft/upscale/crisp",  # Улучшение качества - $0.004
-        "retouch": settings.fal_seedream_edit_model,  # Ретушь - используем Seedream модель ($0.03)
+    "retouch": settings.fal_seedream_edit_model,  # Ретушь - используем Seedream модель ($0.04)
         "face_swap": "fal-ai/face-swap",  # Замена лица - $0.01 (базовая модель, может быть wavespeed-ai/image-face-swap)
         "add_text": "openai/gpt-image-1-mini/edit",  # Добавление текста (через WaveSpeedAI)
         "prompt_generation": "fal-ai/any-llm",  # Генерация промпта - $0.001

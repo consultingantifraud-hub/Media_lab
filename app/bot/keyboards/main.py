@@ -213,6 +213,8 @@ def build_create_model_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=buttons,
         resize_keyboard=True,
+        one_time_keyboard=False,
+        selective=False,
         input_field_placeholder="Выберите модель для создания изображения",
     )
 

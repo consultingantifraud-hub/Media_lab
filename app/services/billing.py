@@ -224,7 +224,7 @@ class BillingService:
 
         # Create PENDING operation (reserve, but don't charge yet)
         # Calculate original price if discount was applied
-        # IMPORTANT: Use the same model parameter to ensure correct price calculation (e.g., Seedream = 7.5₽, not 9₽)
+        # IMPORTANT: Use the same model parameter to ensure correct price calculation (e.g., Seedream = 9₽, not 9₽)
         original_price_kopecks = None
         if discount_percent and discount_percent > 0:
             original_price = get_operation_price(operation_type, model, is_nano_banana_pro)

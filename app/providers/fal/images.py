@@ -337,8 +337,70 @@ def _build_input_payload(prompt: str, options: Dict[str, Any]) -> Dict[str, Any]
     # Получаем модель из options, но не удаляем её сразу, так как она может понадобиться
     model = options.get("model", "")
 
-    # Для Seedream используем image_size как объект с width и height
-    if model and "seedream" in model.lower():
+    # Для Seedream v4.5/edit используем строго схему из документации Fal.ai
+    # Только: prompt, image_size, num_images, max_images, enable_safety_checker, image_urls
+    # БЕЗ: negative_prompt, guidance_scale, num_inference_steps, enhance_prompt_mode, output_format, model, image_url
+    if model and "seedream/v4.5/edit" in model.lower():
+        logger.info("_build_input_payload: Seedream v4.5/edit detected, building payload according to Fal.ai schema")
+        
+        # Устанавливаем image_size
+        if "width" in options and "height" in options:
+            width = options.pop("width")
+            height = options.pop("height")
+            payload["image_size"] = {
+                "width": width,
+                "height": height
+            }
+            logger.info("_build_input_payload: Seedream v4.5/edit, setting image_size={{width: {}, height: {}}}", 
+                       width, height)
+        else:
+            logger.warning("_build_input_payload: Seedream v4.5/edit detected but width/height not found in options! Available keys: {}", list(options.keys()))
+        
+        # Удаляем все лишние поля, которые не нужны для Seedream v4.5/edit
+        options.pop("size", None)
+        options.pop("aspect_ratio", None)
+        options.pop("negative_prompt", None)
+        options.pop("guidance_scale", None)
+        options.pop("num_inference_steps", None)
+        options.pop("enhance_prompt_mode", None)
+        options.pop("output_format", None)
+        options.pop("format", None)
+        options.pop("model", None)
+        options.pop("image_url", None)  # Используем только image_urls
+        options.pop("seed", None)
+        options.pop("cfg_scale", None)
+        
+        # Добавляем только необходимые поля для Seedream v4.5/edit
+        if "num_images" in options:
+            payload["num_images"] = options.pop("num_images")
+        else:
+            payload["num_images"] = 1
+        
+        if "max_images" in options:
+            payload["max_images"] = options.pop("max_images")
+        else:
+            payload["max_images"] = 1
+        
+        if "enable_safety_checker" in options:
+            payload["enable_safety_checker"] = options.pop("enable_safety_checker")
+        else:
+            payload["enable_safety_checker"] = True
+        
+        # image_urls будет добавлен позже в submit_image_edit или submit_smart_merge
+        # Здесь мы только убеждаемся, что он не удален
+        if "image_urls" in options:
+            payload["image_urls"] = options.pop("image_urls")
+        
+        # Удаляем все остальные поля из options, чтобы они не попали в payload
+        # Оставляем только notify_* поля для внутреннего использования
+        keys_to_remove = [key for key in list(options.keys()) if not key.startswith("notify_")]
+        for key in keys_to_remove:
+            options.pop(key, None)
+        
+        logger.info("_build_input_payload: Seedream v4.5/edit final payload keys: {}", list(payload.keys()))
+        return payload
+    # Для других версий Seedream (не v4.5/edit) используем старую логику
+    elif model and "seedream" in model.lower():
         # Seedream принимает image_size как объект: {"width": 1536, "height": 2048}
         # Согласно документации: https://fal.ai/models/bytedance/seedream/v4/text-to-image
         if "width" in options and "height" in options:
@@ -524,9 +586,9 @@ def submit_image_edit(image_path: str, prompt: str, mask_path: str | None = None
     # Получаем размеры исходного изображения
     size = _get_image_size(image_path)
     
-    # Для Seedream добавляем размеры изображения в opts ПЕРЕД вызовом _build_input_payload
+    # Для Seedream v4.5/edit добавляем размеры изображения в opts ПЕРЕД вызовом _build_input_payload
     # чтобы они попали в image_size
-    if model == SEEDREAM_MODEL:
+    if "seedream/v4.5/edit" in model.lower() or model == SEEDREAM_MODEL:
         if size:
             width, height = size
             opts["width"] = width
@@ -571,14 +633,34 @@ def submit_image_edit(image_path: str, prompt: str, mask_path: str | None = None
     use_inpaint_fields = model_supports_inpaint_payload(model)
     input_payload = _build_input_payload(prompt, opts)
     input_payload = apply_model_defaults(model, input_payload)
-    encoded_image = _encode_file_to_data_url(image_path)
-    input_payload["image_url"] = encoded_image
-    if use_inpaint_fields:
-        input_payload["inpaint_image_url"] = encoded_image
     
-    # Для Seedream добавляем image_urls
-    if model == SEEDREAM_MODEL:
-        input_payload.setdefault("image_urls", [encoded_image])
+    # Для Seedream v4.5/edit строго очищаем payload после apply_model_defaults
+    # Удаляем ВСЕ лишние поля, которые не нужны по схеме Fal.ai
+    if "seedream/v4.5/edit" in model.lower():
+        # Список разрешенных полей для Seedream v4.5/edit согласно документации Fal.ai
+        allowed_keys = {"prompt", "image_size", "num_images", "max_images", "enable_safety_checker", "image_urls"}
+        # Удаляем все поля, которые не входят в разрешенный список
+        keys_to_remove = [key for key in list(input_payload.keys()) if key not in allowed_keys]
+        for key in keys_to_remove:
+            input_payload.pop(key, None)
+            logger.debug("submit_image_edit: Removed field '{}' from Seedream v4.5/edit payload", key)
+        logger.info("submit_image_edit: Seedream v4.5/edit final payload after cleanup: keys={}", list(input_payload.keys()))
+    
+    encoded_image = _encode_file_to_data_url(image_path)
+    
+    # Для Seedream v4.5/edit используем ТОЛЬКО image_urls (без image_url)
+    if "seedream/v4.5/edit" in model.lower():
+        input_payload["image_urls"] = [encoded_image]
+        # НЕ добавляем image_url для Seedream v4.5/edit
+    else:
+        # Для других моделей добавляем image_url
+        input_payload["image_url"] = encoded_image
+        if use_inpaint_fields:
+            input_payload["inpaint_image_url"] = encoded_image
+        
+        # Для других версий Seedream добавляем image_urls
+        if model == SEEDREAM_MODEL:
+            input_payload.setdefault("image_urls", [encoded_image])
     
     # Для Flux 2 Pro Edit добавляем image_urls (поддерживает multi-reference editing до 9 изображений)
     if "flux-2-pro" in model.lower() and "/edit" in model.lower():
@@ -635,11 +717,16 @@ def submit_image_edit(image_path: str, prompt: str, mask_path: str | None = None
             
             # Перекодируем изображение
             encoded_image = _encode_file_to_data_url(compressed_path, compress_if_needed=False)
-            input_payload["image_url"] = encoded_image
-            if use_inpaint_fields:
-                input_payload["inpaint_image_url"] = encoded_image
-            if model == SEEDREAM_MODEL:
+            # Для Seedream v4.5/edit используем ТОЛЬКО image_urls (без image_url)
+            if "seedream/v4.5/edit" in model.lower():
                 input_payload["image_urls"] = [encoded_image]
+                # НЕ добавляем image_url для Seedream v4.5/edit
+            else:
+                input_payload["image_url"] = encoded_image
+                if use_inpaint_fields:
+                    input_payload["inpaint_image_url"] = encoded_image
+                if model == SEEDREAM_MODEL:
+                    input_payload["image_urls"] = [encoded_image]
             
             # Проверяем размер снова
             payload_json = json.dumps(input_payload)
@@ -832,18 +919,29 @@ def run_image_edit(image_path: str, prompt: str, mask_path: str | None = None, *
     input_payload = _build_input_payload(prompt, payload_opts)
     input_payload = apply_model_defaults(model, input_payload)
     encoded_image = _encode_file_to_data_url(image_path)
-    input_payload["image_url"] = encoded_image
-    if use_inpaint_fields:
-        input_payload["inpaint_image_url"] = encoded_image
     
-    # Для Seedream добавляем image_urls и размеры изображения
-    if model == SEEDREAM_MODEL:
-        input_payload.setdefault("image_urls", [encoded_image])
+    # Для Seedream v4.5/edit используем ТОЛЬКО image_urls (без image_url)
+    if "seedream/v4.5/edit" in model.lower():
+        input_payload["image_urls"] = [encoded_image]
+        # НЕ добавляем image_url для Seedream v4.5/edit
         size = _get_image_size(image_path)
         if size:
             width, height = size
             input_payload.setdefault("width", width)
             input_payload.setdefault("height", height)
+    else:
+        input_payload["image_url"] = encoded_image
+        if use_inpaint_fields:
+            input_payload["inpaint_image_url"] = encoded_image
+        
+        # Для других версий Seedream добавляем image_urls и размеры изображения
+        if model == SEEDREAM_MODEL:
+            input_payload.setdefault("image_urls", [encoded_image])
+            size = _get_image_size(image_path)
+            if size:
+                width, height = size
+                input_payload.setdefault("width", width)
+                input_payload.setdefault("height", height)
     
     # Для Chrono Edit добавляем только размеры изображения (без image_urls)
     if model == CHRONO_EDIT_MODEL:
@@ -935,6 +1033,18 @@ def submit_smart_merge(
     payload_opts["model"] = model
     input_payload = _build_input_payload(prompt, payload_opts)
     input_payload = apply_model_defaults(model, input_payload)
+    
+    # Для Seedream v4.5/edit строго очищаем payload после apply_model_defaults
+    # Удаляем ВСЕ лишние поля, которые не нужны по схеме Fal.ai
+    if "seedream/v4.5/edit" in model.lower():
+        # Список разрешенных полей для Seedream v4.5/edit согласно документации Fal.ai
+        allowed_keys = {"prompt", "image_size", "num_images", "max_images", "enable_safety_checker", "image_urls"}
+        # Удаляем все поля, которые не входят в разрешенный список
+        keys_to_remove = [key for key in list(input_payload.keys()) if key not in allowed_keys]
+        for key in keys_to_remove:
+            input_payload.pop(key, None)
+            logger.debug("submit_smart_merge: Removed field '{}' from Seedream v4.5/edit payload", key)
+        logger.info("submit_smart_merge: Seedream v4.5/edit final payload after cleanup: keys={}", list(input_payload.keys()))
 
     final_urls: list[str] = []
     for source in (image_sources or [])[:SMART_MERGE_MAX_IMAGES]:
@@ -950,7 +1060,10 @@ def submit_smart_merge(
         raise ValueError("Smart merge requires at least one valid image url or path")
 
     input_payload["image_urls"] = final_urls
-    input_payload.setdefault("image_url", final_urls[0])
+    # Для Seedream v4.5/edit НЕ добавляем image_url (используем только image_urls)
+    # Для других моделей добавляем image_url для обратной совместимости
+    if "seedream/v4.5/edit" not in model.lower():
+        input_payload.setdefault("image_url", final_urls[0])
 
     response = queue_submit(model, input_payload)
     logger.debug("fal submit_smart_merge response: {}", response)
@@ -1409,8 +1522,8 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
         # так как URL от Fal.ai содержит только базовый путь fal-ai/nano-banana (без /edit)
         # Fal.ai использует базовый путь модели в URL, а не полный путь с /edit
         cached_model = cache_entry.get("model")
-        logger.info("resolve_result_asset: request_id={}, parsed_model_path={}, cached_model={}, cache_keys={}", 
-                   request_id, parsed_model_path, cached_model, list(cache_entry.keys()) if cache_entry else "no cache")
+        logger.info("resolve_result_asset: request_id={}, parsed_model_path={}, cached_model={}, cache_keys={}, result_url={}", 
+                   request_id, parsed_model_path, cached_model, list(cache_entry.keys()) if cache_entry else "no cache", result_url[:100] if result_url else "None")
         
         # Определяем правильный путь модели для использования
         if cached_model and "nano-banana" in cached_model.lower() and "/edit" in cached_model.lower():
@@ -1590,6 +1703,108 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
                 # Если это RuntimeError о content policy violation, пробрасываем его дальше
                 if isinstance(result_exc, RuntimeError) and "content policy" in str(result_exc).lower():
                     raise
+        # Для Seedream v4.5/edit используем ТОЛЬКО response_url из queue_response/raw_result
+        # НЕ используем пути вида /seedream/v4.5/requests/{id} - они дают 405
+        elif cached_model and "seedream" in cached_model.lower():
+            logger.info("resolve_result_asset: Using response_url ONLY for seedream (request_id={}, cached_model={})", 
+                       request_id, cached_model)
+            try:
+                # Получаем response_url из queue_response или raw_result
+                response_url = None
+                queue_response = cache_entry.get("queue_response")
+                if queue_response and isinstance(queue_response, dict):
+                    response_url = queue_response.get("response_url")
+                    logger.info("resolve_result_asset: Got response_url from queue_response for seedream: {}", response_url[:100] if response_url else "None")
+                
+                if not response_url:
+                    raw_result = cache_entry.get("raw_result")
+                    if raw_result and isinstance(raw_result, dict):
+                        response_url = raw_result.get("response_url")
+                        logger.info("resolve_result_asset: Got response_url from raw_result for seedream: {}", response_url[:100] if response_url else "None")
+                
+                if not response_url:
+                    raise RuntimeError("Seedream: response_url not found in queue_response or raw_result")
+                
+                if not response_url.startswith("http"):
+                    raise RuntimeError(f"Seedream: invalid response_url format: {response_url}")
+                
+                # Делаем GET запрос к response_url
+                logger.info("resolve_result_asset: Making GET request to response_url for seedream: {}", response_url[:100])
+                from app.providers.fal.client import queue_get
+                try:
+                    response_data = queue_get(response_url)
+                    logger.info("resolve_result_asset: Got response from response_url for seedream: keys={}", 
+                               list(response_data.keys()) if isinstance(response_data, dict) else "not a dict")
+                    
+                    # Извлекаем image URL из ответа
+                    # Проверяем поля: image_url, image, output, images
+                    image_url = None
+                    
+                    # Прямые поля
+                    for key in ["image_url", "image", "output"]:
+                        if key in response_data:
+                            value = response_data[key]
+                            if isinstance(value, str) and value.startswith(("http://", "https://", "data:")):
+                                image_url = value
+                                logger.info("resolve_result_asset: Found image URL in field '{}' for seedream: {}", key, image_url[:100])
+                                break
+                    
+                    # Поле images (массив объектов)
+                    if not image_url and "images" in response_data:
+                        images_value = response_data["images"]
+                        if isinstance(images_value, list) and images_value:
+                            first_image = images_value[0]
+                            if isinstance(first_image, dict):
+                                # Проверяем поле "url" в первом объекте
+                                if "url" in first_image and isinstance(first_image["url"], str):
+                                    image_url = first_image["url"]
+                                    logger.info("resolve_result_asset: Found image URL in images[0]['url'] for seedream: {}", image_url[:100])
+                                else:
+                                    # Пробуем извлечь через _extract_image_url
+                                    image_url = _extract_image_url(first_image)
+                                    if image_url:
+                                        logger.info("resolve_result_asset: Found image URL in images[0] for seedream: {}", image_url[:100])
+                            elif isinstance(first_image, str):
+                                image_url = first_image
+                                logger.info("resolve_result_asset: Found image URL in images[0] (string) for seedream: {}", image_url[:100])
+                    
+                    # Если не нашли, пробуем _extract_image_url на всем ответе
+                    if not image_url:
+                        image_url = _extract_image_url(response_data)
+                        if image_url:
+                            logger.info("resolve_result_asset: Found image URL via _extract_image_url for seedream: {}", image_url[:100])
+                    
+                    if image_url:
+                        # Пропускаем queue API endpoints
+                        if image_url.startswith("https://queue.fal.run") or image_url.startswith("http://queue.fal.run"):
+                            raise RuntimeError(f"Seedream: image_url is a queue API endpoint, not a direct image URL: {image_url}")
+                        
+                        result_candidates.append(response_data)
+                        logger.info("resolve_result_asset: Successfully extracted image URL for seedream: {}", image_url[:100])
+                    else:
+                        logger.error("resolve_result_asset: No image URL found in response_data for seedream. Response keys: {}, Full response: {}", 
+                                    list(response_data.keys()) if isinstance(response_data, dict) else "not a dict",
+                                    str(response_data)[:1000])
+                        raise RuntimeError("Seedream: image url missing in response_url")
+                        
+                except httpx.HTTPStatusError as exc:
+                    status_code = exc.response.status_code
+                    response_text = exc.response.text[:1000] if hasattr(exc.response, 'text') else str(exc)
+                    logger.error("resolve_result_asset: GET request to response_url failed for seedream: {} {}", 
+                               status_code, response_text)
+                    # Для 4xx/5xx ошибок логируем тело ответа и кидаем понятную RuntimeError
+                    # НЕ пытаемся больше крутить никакие queue_get/queue_result для Seedream
+                    raise RuntimeError(f"Seedream: failed to get result from response_url: {status_code}. Response body: {response_text}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("resolve_result_asset: Error getting result from response_url for seedream: {}", exc, exc_info=True)
+                    # НЕ пытаемся больше крутить никакие queue_get/queue_result для Seedream
+                    raise RuntimeError(f"Seedream: error getting result from response_url: {exc}")
+            except RuntimeError:
+                # Пробрасываем RuntimeError дальше
+                raise
+            except Exception as result_exc:  # noqa: BLE001
+                logger.error("resolve_result_asset: Failed to get result for seedream: {}", result_exc, exc_info=True)
+                raise RuntimeError(f"Seedream: failed to get result: {result_exc}")
         else:
             # Для других моделей используем queue_result
             attempts = 0
@@ -1685,14 +1900,16 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
 
         result = None
         image_url = None
-        logger.info("resolve_result_asset: Checking {} candidates for image URL", len(result_candidates))
+        logger.info("resolve_result_asset: Checking {} candidates for image URL (cached_model={})", len(result_candidates), cached_model)
         for idx, candidate in enumerate(result_candidates):
             candidate_type = type(candidate).__name__
             candidate_keys = list(candidate.keys()) if isinstance(candidate, dict) else "not a dict"
             logger.info("resolve_result_asset: Checking candidate {}: type={}, keys={}", idx + 1, candidate_type, candidate_keys)
-            # Для Flux 2 Flex добавляем детальное логирование
-            if cached_model and "flux-2-flex" in cached_model.lower():
-                logger.info("resolve_result_asset: Flux 2 Flex candidate {} full content: {}", idx + 1, str(candidate)[:1000] if isinstance(candidate, dict) else str(candidate)[:1000])
+            # Для Flux 2 Flex и Seedream добавляем детальное логирование
+            if cached_model and ("flux-2-flex" in cached_model.lower() or "seedream" in cached_model.lower()):
+                logger.info("resolve_result_asset: {} candidate {} full content: {}", 
+                          "Seedream" if "seedream" in cached_model.lower() else "Flux 2 Flex", 
+                          idx + 1, str(candidate)[:1000] if isinstance(candidate, dict) else str(candidate)[:1000])
             image_url = _extract_image_url(candidate or {})
             if image_url:
                 result = candidate
@@ -1713,6 +1930,23 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
                 # Для nano-banana/edit результат должен быть в статусе или response_url
                 # Если мы здесь, значит результат не найден - это ошибка
                 logger.debug("nano-banana/edit result not found in status or response_url - this should not happen")
+            # Для Seedream используем queue_get для result_url, если это queue.fal.run URL
+            elif cached_model and "seedream" in cached_model.lower() and "queue.fal.run" in result_url:
+                logger.info("resolve_result_asset: Trying queue_get for seedream result_url (fallback): {}", result_url[:100])
+                try:
+                    from app.providers.fal.client import queue_get
+                    response_data = queue_get(result_url)
+                    logger.info("resolve_result_asset: Got result from queue_get for seedream result_url: keys={}", 
+                               list(response_data.keys()) if isinstance(response_data, dict) else "not a dict")
+                    candidate_url = _extract_image_url(response_data)
+                    if candidate_url:
+                        image_url = candidate_url
+                        result = response_data
+                        logger.info("resolve_result_asset: Extracted image URL from seedream result_url: {}", image_url[:100] if len(image_url) > 100 else image_url)
+                    else:
+                        logger.warning("resolve_result_asset: No image URL found in queue_get result for seedream result_url")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("resolve_result_asset: queue_get failed for seedream result_url: {}", exc, exc_info=True)
             else:
                 logger.debug("Trying to fetch result from response_url using queue_get: {}", result_url)
                 try:
@@ -1739,8 +1973,29 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
 
     image_url = _extract_image_url(result or {})
     if not image_url:
+        # Для Seedream пробуем использовать queue_result с базовым путем, если это queue.fal.run URL
+        if result_url and result_url.startswith("http") and "queue.fal.run" in result_url:
+            # Проверяем, не является ли это Seedream моделью
+            if cached_model and "seedream" in cached_model.lower():
+                logger.info("resolve_result_asset: Final attempt - trying queue_result for seedream (request_id={}, cached_model={})", request_id, cached_model)
+                try:
+                    from app.providers.fal.client import queue_result
+                    # Для Seedream v4.5/edit используем полный путь модели с /edit
+                    response_data = queue_result(cached_model, request_id)
+                    logger.info("resolve_result_asset: Got result from queue_result for seedream (final attempt): keys={}", 
+                               list(response_data.keys()) if isinstance(response_data, dict) else "not a dict")
+                    candidate_url = _extract_image_url(response_data)
+                    if candidate_url:
+                        image_url = candidate_url
+                        result = response_data
+                        logger.info("resolve_result_asset: Extracted image URL from seedream queue_result (final attempt): {}", image_url[:100] if len(image_url) > 100 else image_url)
+                    else:
+                        logger.warning("resolve_result_asset: No image URL found in queue_result for seedream (final attempt)")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("resolve_result_asset: queue_result failed for seedream (final attempt): {}", exc, exc_info=True)
+        
         # Последняя попытка: использовать result_url напрямую только если это похоже на CDN URL
-        if result_url and result_url.startswith("http"):
+        if not image_url and result_url and result_url.startswith("http"):
             # Не используем result_url как fallback, если это не CDN URL (queue API endpoints не работают напрямую)
             if "cdn.fal.ai" not in result_url and "storage.googleapis.com" not in result_url:
                 logger.warning("result_url does not look like a CDN URL, cannot use as fallback: {}", result_url)
@@ -1748,7 +2003,7 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
             else:
                 logger.debug("Using result_url as fallback image URL: {}", result_url)
                 image_url = result_url
-        else:
+        elif not image_url:
             raise RuntimeError("fal response did not include an image url")
     file_name = None
     if isinstance(result, dict):

@@ -9,7 +9,7 @@ from app.core.config import settings
 PRICE_NANO_BANANA_PRO = float(os.getenv("PRICE_NANO_BANANA_PRO", "26"))
 PRICE_FLUX2FLEX = float(os.getenv("PRICE_FLUX2FLEX", "12"))  # Цена для Flux 2 Flex
 PRICE_OTHER_MODELS = float(os.getenv("PRICE_OTHER_MODELS", "9"))
-PRICE_SEEDREAM = float(os.getenv("PRICE_SEEDREAM", "7.5"))  # Цена для Seedream в операциях generate и edit
+PRICE_SEEDREAM = float(os.getenv("PRICE_SEEDREAM", "9.0"))  # Цена для Seedream в операциях generate и edit
 PRICE_PROMPT_GENERATION = float(os.getenv("PRICE_PROMPT_GENERATION", "3"))
 PRICE_FACE_SWAP = float(os.getenv("PRICE_FACE_SWAP", "4"))
 PRICE_ADD_TEXT = float(os.getenv("PRICE_ADD_TEXT", "1"))
@@ -46,8 +46,8 @@ OPERATION_NAMES: Dict[str, str] = {
 
 # Operation type descriptions for pricing display
 OPERATION_DESCRIPTIONS: Dict[str, str] = {
-    "generate": "Генерация изображения (Nano Banana Pro: 26₽, Seedream: 7.5₽, другие модели: 9₽)",
-    "edit": "Редактирование изображения (Seedream: 7.5₽, другие модели: 9₽)",
+    "generate": "Генерация изображения (Nano Banana Pro: 26₽, Seedream: 9₽, другие модели: 9₽)",
+    "edit": "Редактирование изображения (Seedream: 9₽, другие модели: 9₽)",
     "merge": "Объединение изображений (Nano Banana Pro: 26₽, другие модели: 9₽)",
     "retouch": "Ретушь (9₽)",
     "upscale": "Улучшение качества",
@@ -86,13 +86,13 @@ def get_operation_price(
         if is_flux2flex:
             return PRICE_FLUX2FLEX  # 12 рублей для Flux 2 Flex
         if is_seedream:
-            return PRICE_SEEDREAM  # 7.5 рублей для Seedream
+            return PRICE_SEEDREAM  # 9 рублей для Seedream
         return OPERATION_PRICES["generate_other"]
     
     # Check if it's edit operation
     if operation_type == "edit":
         if is_seedream:
-            return PRICE_SEEDREAM  # 7.5 рублей для Seedream edit
+            return PRICE_SEEDREAM  # 9 рублей для Seedream edit
         return OPERATION_PRICES["edit"]
     
     # Check if it's Nano Banana Pro merge
@@ -101,7 +101,7 @@ def get_operation_price(
             return OPERATION_PRICES["generate_nano_banana_pro"]  # 26 рублей для Nano Banana Pro merge
         # Проверяем, является ли модель Seedream для merge
         if is_seedream:
-            return PRICE_SEEDREAM  # 7.5 рублей для Seedream merge
+            return PRICE_SEEDREAM  # 9 рублей для Seedream merge
         return OPERATION_PRICES["generate_other"]  # 9 рублей для других моделей merge
     
     # Check for specific operation types (retouch uses default price, not Seedream price)

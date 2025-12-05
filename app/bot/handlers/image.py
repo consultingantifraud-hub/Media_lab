@@ -31,6 +31,7 @@ from app.bot.keyboards.main import (
     IMAGE_SIZE_SQUARE_BUTTON,
     IMAGE_SIZE_VERTICAL_BUTTON,
     IMAGE_STANDARD_BUTTON,
+    IMAGE_FLUX2FLEX_CREATE_BUTTON,
     INFO_BUTTON,
     PROMPT_WRITER_BUTTON,
     RETOUCHER_ENHANCE_BUTTON,
@@ -139,7 +140,7 @@ async def _send_error_notification(message: types.Message, error_context: str = 
 IMAGE_LIGHT_MODEL = settings.fal_standard_model
 IMAGE_STANDARD_MODEL = settings.fal_premium_model
 IMAGE_EDIT_MODEL = settings.fal_edit_model
-IMAGE_EDIT_ALT_MODEL = settings.fal_seedream_edit_model
+IMAGE_EDIT_ALT_MODEL = settings.fal_seedream_edit_model  # Seedream 4.5 edit
 LAST_JOB_BY_CHAT: dict[int, str] = {}
 PROMPT_ACCEPTED_TEXT = (
     "Промпт принят ✅.\nТеперь выберите действие из меню."
@@ -166,7 +167,7 @@ SMART_MERGE_MODEL_KEY = "smart_merge_model"
 SMART_MERGE_SIZE_KEY = "smart_merge_size"  # Ключ для хранения выбранного размера
 SMART_MERGE_PRO_MODEL = "fal-ai/nano-banana-pro/edit"
 SMART_MERGE_DEFAULT_MODEL = "fal-ai/nano-banana/edit"
-SMART_MERGE_SEEDREAM_MODEL = settings.fal_seedream_edit_model
+SMART_MERGE_SEEDREAM_MODEL = settings.fal_seedream_edit_model  # Seedream 4.5 edit
 SMART_MERGE_DEFAULT_SIZE = "1024x1024"
 SMART_MERGE_DEFAULT_ASPECT_RATIO = "1:1"
 SMART_MERGE_MAX_IMAGES = 8
@@ -191,18 +192,13 @@ RETOUCHER_MODE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "enhance": {
         "label": "Усилить черты",
-        "model": "fal-ai/nano-banana/edit",  # Nano Banana Edit для качественной ретуши без добавления новых объектов
+        "model": settings.fal_seedream_edit_model,  # Seedream 4.5 Edit для качественной ретуши
         "base_prompt": (
-            "Улучши черты лица естественно и деликатно. "
-            "Улучши четкость, гладкость и текстуру кожи. "
-            "Немного улучши четкость и яркость глаз. "
-            "Сохрани точно такую же структуру лица, пропорции, костную структуру, возраст и идентичность. "
-            "Оставь губы точно такими же - не улучшай, не определяй и не меняй цвет или форму губ. "
-            "НЕ добавляй новые объекты, растительность на лице, седые волосы или не меняй цвет волос. "
-            "НЕ меняй форму лица, глаз, носа или рта. "
-            "НЕ делай человека моложе или старше - сохрани тот же возраст. "
-            "Только улучши текстуру и четкость кожи, и немного осветли глаза. "
-            "Сохрани все оригинальные детали и не добавляй ничего, чего не было в оригинальном изображении."
+            "Subtle, high-quality face and skin retouch while keeping the person in the same position and scale in the frame. "
+            "Do not zoom in, do not crop, do not change the framing or composition. "
+            "Keep the original background, full body and surroundings visible if they were in the input image. "
+            "Gently enhance facial features, skin texture, clarity and lighting, but do not change the pose, proportions or camera distance. "
+            "No dramatic reshaping, no transformation into a close-up portrait, no change of style."
         ),
         "base_options": {
             "output_format": "png",
@@ -255,7 +251,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
     },
     "seedream-create": {
         "label": "изображение",
-        "model": settings.fal_seedream_create_model,  # Модель для создания без входного изображения
+        "model": "fal-ai/bytedance/seedream/v4/text-to-image",  # Модель для создания без входного изображения
         "base": {
             "output_format": "png",
             "guidance_scale": 12.0,  # Увеличено для максимального качества и детализации
@@ -280,6 +276,19 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         },
         "sizes": {
             # Старые размеры для обратной совместимости (не используются с новой системой форматов)
+            "vertical": {"size": "1024x1792", "aspect_ratio": "9:16", "width": 1024, "height": 1792},
+            "square": {"size": "1024x1024", "aspect_ratio": "1:1", "width": 1024, "height": 1024},
+            "horizontal": {"size": "1792x1024", "aspect_ratio": "16:9", "width": 1792, "height": 1024},
+        },
+    },
+    "flux2flex-create": {
+        "label": "изображение",
+        "model": "fal-ai/flux-2-flex",  # Flux 2 Flex через Fal.ai
+        "base": {
+            "output_format": "png",
+        },
+        "sizes": {
+            # Flux 2 Flex использует image_size как enum, размеры будут обработаны через get_model_format_mapping
             "vertical": {"size": "1024x1792", "aspect_ratio": "9:16", "width": 1024, "height": 1792},
             "square": {"size": "1024x1024", "aspect_ratio": "1:1", "width": 1024, "height": 1024},
             "horizontal": {"size": "1792x1024", "aspect_ratio": "16:9", "width": 1792, "height": 1024},
@@ -1320,7 +1329,8 @@ async def handle_create(message: types.Message, state: FSMContext) -> None:
                 "Выберите модель для создания изображения:\n"
                 "• **Nano Banana Pro** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
                 "• **Nano Banana** — топовая нейросеть, пишет только заголовки на кириллице\n"
-                "• **Seedream** — качественная нейросеть, пишет текст только на английском языке",
+                "• **Seedream 4.5** — качественная нейросеть, пишет текст только на английском языке\n"
+                "• **Flux 2 Flex** — оптимизирована для естественного вида изображений без излишней детализации",
                 reply_markup=build_create_model_keyboard(),
                 parse_mode="Markdown",
             )
@@ -1427,6 +1437,38 @@ async def handle_seedream_create(message: types.Message, state: FSMContext) -> N
         await _send_error_notification(message, "handle_seedream_create")
 
 
+async def handle_flux_flex_create(message: types.Message, state: FSMContext) -> None:
+    """Обработчик выбора модели Flux 2 Flex после нажатия 'Создать'."""
+    try:
+        # Проверяем, не находимся ли мы в режиме Smart merge
+        data = await state.get_data()
+        smart_merge_stage = data.get(SMART_MERGE_STAGE_KEY)
+        if smart_merge_stage:
+            logger.debug("handle_flux_flex_create: ignoring because smart_merge_stage is active")
+            return
+        
+        prompt = await _require_prompt(message, state)
+        if not prompt:
+            logger.warning("handle_flux_flex_create: prompt not found in state for user {}", 
+                          message.from_user.id if message.from_user else "unknown")
+            return
+        logger.info("handle_flux_flex_create: prompt found: '{}', saving selected_model='flux2flex-create'", prompt[:50])
+        await state.update_data(selected_model="flux2flex-create", prompt=prompt)
+        
+        format_hints = get_format_hints_text()
+        format_message = (
+            "Вы выбрали Flux 2 Flex. Выберите формат изображения:\n\n"
+            f"{format_hints}"
+        )
+        await message.answer(
+            format_message,
+            reply_markup=build_format_keyboard(),
+        )
+    except Exception as exc:
+        logger.error("Error in handle_flux_flex_create: {}", exc, exc_info=True)
+        await _send_error_notification(message, "handle_flux_flex_create")
+
+
 async def handle_gpt_create(message: types.Message, state: FSMContext) -> None:
     """Обработчик выбора модели Nano Banana Pro после нажатия 'Создать'."""
     try:
@@ -1513,7 +1555,7 @@ async def handle_format_choice(message: types.Message, state: FSMContext) -> Non
                 model_for_format = "fal-ai/nano-banana"
                 logger.info("handle_format_choice: detected Nano Banana edit model")
             elif model_path == SMART_MERGE_SEEDREAM_MODEL:
-                model_for_format = settings.fal_seedream_edit_model
+                model_for_format = settings.fal_seedream_edit_model  # Seedream 4.5 edit
                 logger.info("handle_format_choice: detected Seedream edit model")
             else:
                 logger.warning("handle_format_choice: model_path='{}' is not supported for Smart Merge format selection", model_path)
@@ -2184,7 +2226,7 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
         return
     
     # Игнорируем кнопки выбора модели - они обрабатываются своими handlers
-    if text == IMAGE_STANDARD_BUTTON or text == IMAGE_SEEDREAM_CREATE_BUTTON or text == IMAGE_GPT_CREATE_BUTTON:
+    if text == IMAGE_STANDARD_BUTTON or text == IMAGE_SEEDREAM_CREATE_BUTTON or text == IMAGE_GPT_CREATE_BUTTON or text == IMAGE_FLUX2FLEX_CREATE_BUTTON:
         return
     
     # Игнорируем кнопки выбора размера - они обрабатываются handle_size_choice
@@ -2379,7 +2421,8 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
             "Пожалуйста, выберите модель для создания изображения из предложенных кнопок:\n"
             "• **Nano Banana Pro** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
             "• **Nano Banana** — топовая нейросеть, пишет только заголовки на кириллице\n"
-            "• **Seedream** — качественная нейросеть, пишет текст только на английском языке",
+            "• **Seedream 4.5** — качественная нейросеть, пишет текст только на английском языке\n"
+            "• **Flux 2 Flex** — оптимизирована для естественного вида изображений без излишней детализации",
             reply_markup=build_create_model_keyboard(),
             parse_mode="Markdown",
         )
@@ -2416,7 +2459,8 @@ async def handle_prompt_input(message: types.Message, state: FSMContext) -> None
         "Промпт принят ✅.\nВыберите модель для создания изображения:\n"
         "• **Nano Banana Pro** — лучшая нейросеть, в т.ч. работает с длинными текстами на кириллице\n"
         "• **Nano Banana** — топовая нейросеть, пишет только заголовки на кириллице\n"
-        "• **Seedream** — качественная нейросеть, пишет текст только на английском языке",
+        "• **Seedream 4.5** — качественная нейросеть, пишет текст только на английском языке\n"
+        "• **Flux 2 Flex** — оптимизирована для естественного вида изображений без излишней детализации",
         reply_markup=build_create_model_keyboard(),
         parse_mode="Markdown",
     )
@@ -3052,11 +3096,12 @@ def register_image_handlers(dp: Dispatcher) -> None:
     
     # Регистрируем обработчики создания изображения ПОСЛЕДНИМИ, чтобы они проверялись ПЕРВЫМИ
     # Это гарантирует, что они имеют приоритет при обработке кнопок моделей после "Создать"
-    # Порядок моделей (приоритет): 1. Nano Banana Pro, 2. Nano Banana, 3. Seedream
+    # Порядок моделей (приоритет): 1. Nano Banana Pro, 2. Nano Banana, 3. Seedream, 4. Flux 2 Flex
     dp.message.register(handle_create, _match_button(CREATE_BUTTON))
     dp.message.register(handle_gpt_create, _match_button(IMAGE_GPT_CREATE_BUTTON))  # 1. Nano Banana Pro
     dp.message.register(handle_standard, _match_button(IMAGE_STANDARD_BUTTON))  # 2. Nano Banana
     dp.message.register(handle_seedream_create, _match_button(IMAGE_SEEDREAM_CREATE_BUTTON))  # 3. Seedream
+    dp.message.register(handle_flux_flex_create, _match_button(IMAGE_FLUX2FLEX_CREATE_BUTTON))  # 4. Flux 2 Flex
     
     # Обработчики редактирования регистрируем ПЕРЕД созданием,
     # чтобы они проверялись ПОСЛЕ создания (в обратном порядке)
@@ -3120,3 +3165,4 @@ def register_image_handlers(dp: Dispatcher) -> None:
         return True
     
     dp.message.register(handle_prompt_input, prompt_input_filter)
+

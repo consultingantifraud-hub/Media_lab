@@ -1034,14 +1034,18 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
             logger.info("Image job {}: Applied enhanced quality settings for nano-banana-pro: num_inference_steps={}, guidance_scale={}", 
                        job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
         elif "seedream" in model_name.lower():
-            # Применяем максимальные настройки качества для Seedream (увеличенная прорисовка и детализация)
-            # Принудительно устанавливаем максимальные значения для максимального качества
-            provider_options["num_inference_steps"] = 120
-            provider_options["guidance_scale"] = 12.0
-            # Добавляем enhance_prompt_mode для максимального качества (standard вместо fast)
-            provider_options["enhance_prompt_mode"] = "standard"
-            logger.info("Image job {}: Applied enhanced quality settings for Seedream: num_inference_steps={}, guidance_scale={}, enhance_prompt_mode={}", 
-                       job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"), provider_options.get("enhance_prompt_mode"))
+            # Оптимизированные настройки для Seedream (баланс качества и естественности)
+            # Исправлено: снижены параметры для предотвращения артефактов (зеленые светящиеся глаза и т.д.)
+            provider_options["num_inference_steps"] = 60
+            provider_options["guidance_scale"] = 7.5
+            # Быстрый режим для более естественной интерпретации промпта
+            provider_options["enhance_prompt_mode"] = "fast"
+            # Добавляем negative_prompt для избежания неестественных эффектов (если не задан в base_options)
+            if "negative_prompt" not in provider_options:
+                provider_options["negative_prompt"] = "glowing eyes, neon eyes, glowing green eyes, unnatural eye colors, eye glow, glowing effects on eyes, artifacts, distorted features, oversaturated, unrealistic lighting, glowing skin, neon effects"
+            logger.info("Image job {}: Applied optimized quality settings for Seedream: num_inference_steps={}, guidance_scale={}, enhance_prompt_mode={}, negative_prompt={}", 
+                       job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"), 
+                       provider_options.get("enhance_prompt_mode"), provider_options.get("negative_prompt")[:50] if provider_options.get("negative_prompt") else None)
         
         logger.info("Image job {}: Submitting image job with model: {}", job_id, model_name)
         logger.info("Image job {}: provider_options keys: {}, width: {}, height: {}, num_inference_steps: {}, guidance_scale: {}", 
@@ -2090,12 +2094,17 @@ def process_smart_merge_job(
         logger.info("Smart merge job {}: Applied enhanced quality settings for nano-banana-pro: num_inference_steps={}, guidance_scale={}", 
                    job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"))
     elif is_seedream:
-        # Применяем максимальные настройки качества для Seedream (увеличенная прорисовка и детализация)
-        provider_options["num_inference_steps"] = 120
-        provider_options["guidance_scale"] = 12.0
-        provider_options["enhance_prompt_mode"] = "standard"  # Добавлен для повышения качества промпта
-        logger.info("Smart merge job {}: Applied enhanced quality settings for Seedream: num_inference_steps={}, guidance_scale={}, enhance_prompt_mode={}", 
-                   job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"), provider_options.get("enhance_prompt_mode"))
+        # Оптимизированные настройки для Seedream (баланс качества и естественности)
+        # Исправлено: снижены параметры для предотвращения артефактов
+        provider_options["num_inference_steps"] = 60
+        provider_options["guidance_scale"] = 7.5
+        provider_options["enhance_prompt_mode"] = "fast"  # Быстрый режим для более естественной интерпретации
+        # Добавляем negative_prompt для избежания неестественных эффектов (если не задан)
+        if "negative_prompt" not in provider_options:
+            provider_options["negative_prompt"] = "glowing eyes, unnatural colors, artifacts, distorted features, oversaturated, neon eyes, glowing effects, unrealistic lighting"
+        logger.info("Smart merge job {}: Applied optimized quality settings for Seedream: num_inference_steps={}, guidance_scale={}, enhance_prompt_mode={}, negative_prompt={}", 
+                   job_id, provider_options.get("num_inference_steps"), provider_options.get("guidance_scale"), 
+                   provider_options.get("enhance_prompt_mode"), provider_options.get("negative_prompt")[:50] if provider_options.get("negative_prompt") else None)
 
     notify_options = _extract_notify_options(provider_options)
     output_file = Path(output_path)

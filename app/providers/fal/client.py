@@ -237,8 +237,89 @@ def queue_status(model: str, request_id: str) -> dict:
 
 
 def queue_result(model: str, request_id: str) -> dict:
-    base_model = _base_model_path(model)
+    """
+    Get result from fal.ai queue API.
+    
+    For Seedream v4.5/edit and similar models, fal.ai requires POST request with requestId in body:
+    POST /fal-ai/bytedance/seedream/v4.5/edit
+    Body: {"requestId": "..."}
+    
+    For other models, we try GET requests to various endpoints.
+    """
+    # Check if this is a Seedream model that requires POST with requestId in body
     normalized = _normalize_path(model)
+    is_seedream = "seedream" in normalized.lower()
+    
+    if is_seedream:
+        # For Seedream, use POST with requestId in body according to fal.ai documentation
+        # https://fal.ai/models/fal-ai/bytedance/seedream/v4.5/edit/api
+        url = _build_queue_url(model)
+        payload = {"requestId": request_id}
+        _log_request("POST", url, payload)
+        
+        max_retries = 3
+        retry_delay = 1.0
+        last_error: Exception | None = None
+        
+        for attempt in range(max_retries):
+            try:
+                client = _get_http_client()
+                queue_timeout = httpx.Timeout(
+                    connect=30.0,
+                    read=60.0,
+                    write=30.0,
+                    pool=30.0,
+                )
+                response = client.post(url, json=payload, headers=_get_headers(), timeout=queue_timeout)
+                if response.is_error:
+                    _log_response(url, response.status_code, response.text)
+                    response.raise_for_status()
+                data = response.json()
+                _log_response(url, response.status_code, data)
+                logger.debug("queue_result {} succeeded for seedream on attempt {}", request_id, attempt + 1)
+                return data
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                status_code = exc.response.status_code
+                response_text = exc.response.text[:200] if hasattr(exc.response, 'text') else str(exc)
+                retryable_header = exc.response.headers.get("X-Fal-Retryable", "not set")
+                logger.debug("queue_result {} -> {} {} (X-Fal-Retryable: {})", 
+                            url, status_code, response_text, retryable_header)
+                
+                # Retry on server errors (500, 502, 503) and auth errors (401)
+                if status_code in (500, 502, 503, 401) and attempt < max_retries - 1:
+                    logger.warning(
+                        "queue_result {} attempt {} failed with {}: {} (X-Fal-Retryable: {}). Retrying in {:.1f}s",
+                        request_id,
+                        attempt + 1,
+                        status_code,
+                        response_text,
+                        retryable_header,
+                        retry_delay,
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    logger.error("queue_result {} failed after {} attempts with {}: {} (X-Fal-Retryable: {})", 
+                                request_id, max_retries, status_code, response_text, retryable_header)
+                    raise
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt < max_retries - 1:
+                    logger.warning("queue_result {} attempt {} failed: {}. Retrying in {:.1f}s", 
+                                  request_id, attempt + 1, exc, retry_delay)
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise
+        
+        if last_error:
+            raise last_error
+        raise RuntimeError("queue_result failed without HTTP error")
+    
+    # For non-Seedream models, use GET requests to various endpoints (original logic)
+    base_model = _base_model_path(model)
     candidate_paths: list[str] = [
         _build_queue_url(base_model, f"requests/{request_id}"),
     ]

@@ -1807,76 +1807,84 @@ def resolve_result_asset(result_url: str) -> ImageAsset:
                 raise RuntimeError(f"Seedream: failed to get result: {result_exc}")
         else:
             # Для других моделей используем queue_result
-            attempts = 0
-            max_attempts = 3  # Уменьшено с 5 до 3 - обычно результат получается с первой попытки
-            delay = 0.3
-            last_error: Exception | None = None
-            # Используем путь модели для получения результата
-            current_model_path = model_path
-            
-            logger.debug("📡 API REQUEST: resolve_result_asset starting for {} (max_attempts: {})", request_id[:8], max_attempts)
-            while attempts < max_attempts:
-                try:
-                    logger.debug("📡 API REQUEST: queue_result attempt {}/{} for {} (model: {})", 
-                               attempts + 1, max_attempts, request_id[:8], current_model_path)
-                    response_payload = queue_result(current_model_path, request_id)
-                    # Логируем только ключи, не весь payload для экономии места в логах
-                    logger.info("📡 API RESPONSE: queue_result for {} succeeded on attempt {}: payload keys: {}", 
-                               request_id[:8], attempts + 1, list(response_payload.keys()) if isinstance(response_payload, dict) else "not a dict")
-                    result_candidates.append(response_payload)
-                    break
-                except httpx.HTTPStatusError as exc:
-                    last_error = exc
-                    status_code = exc.response.status_code
-                    # Retry on server errors (500, 502, 503)
-                    if status_code in (500, 502, 503) and attempts < max_attempts - 1:
-                        logger.warning(
-                            "resolve_result_asset {} attempt {} failed with {}: {}. Retrying in {:.1f}s",
-                            request_id,
-                            attempts + 1,
-                            status_code,
-                            exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
-                            delay,
-                        )
-                        attempts += 1
-                        time.sleep(delay)
-                        delay *= 2
-                        continue
-                    if exc.response.status_code in {404, 405}:
-                        # Для других моделей пробуем использовать модель из кэша
-                        cached_model = cache_entry.get("model")
-                        if cached_model and cached_model != current_model_path:
-                            logger.debug(
-                                "Retrying queue_result for {} using cached model {} due to {}",
+            cached_model = cache_entry.get("model")
+            model_is_retoucher = cached_model == settings.fal_retoucher_model
+            if model_is_retoucher:
+                logger.info(
+                    "resolve_result_asset: Retoucher model detected ({}), skipping queue_result and relying on response_url",
+                    cached_model,
+                )
+            else:
+                attempts = 0
+                max_attempts = 3  # Уменьшено с 5 до 3 - обычно результат получается с первой попытки
+                delay = 0.3
+                last_error: Exception | None = None
+                # Используем путь модели для получения результата
+                current_model_path = model_path
+                
+                logger.debug("📡 API REQUEST: resolve_result_asset starting for {} (max_attempts: {})", request_id[:8], max_attempts)
+                while attempts < max_attempts:
+                    try:
+                        logger.debug("📡 API REQUEST: queue_result attempt {}/{} for {} (model: {})", 
+                                   attempts + 1, max_attempts, request_id[:8], current_model_path)
+                        response_payload = queue_result(current_model_path, request_id)
+                        # Логируем только ключи, не весь payload для экономии места в логах
+                        logger.info("📡 API RESPONSE: queue_result for {} succeeded on attempt {}: payload keys: {}", 
+                                   request_id[:8], attempts + 1, list(response_payload.keys()) if isinstance(response_payload, dict) else "not a dict")
+                        result_candidates.append(response_payload)
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        last_error = exc
+                        status_code = exc.response.status_code
+                        # Retry on server errors (500, 502, 503)
+                        if status_code in (500, 502, 503) and attempts < max_attempts - 1:
+                            logger.warning(
+                                "resolve_result_asset {} attempt {} failed with {}: {}. Retrying in {:.1f}s",
                                 request_id,
-                                cached_model,
-                                exc.response.status_code,
-                            )
-                            current_model_path = cached_model
-                        else:
-                            logger.debug(
-                                "queue_result for {} still returning {}. Will retry after {:.1f}s",
-                                request_id,
-                                exc.response.status_code,
+                                attempts + 1,
+                                status_code,
+                                exc.response.text[:100] if hasattr(exc.response, 'text') else str(exc),
                                 delay,
                             )
+                            attempts += 1
+                            time.sleep(delay)
+                            delay *= 2
+                            continue
+                        if exc.response.status_code in {404, 405}:
+                            # Для других моделей пробуем использовать модель из кэша
+                            cached_model = cache_entry.get("model")
+                            if cached_model and cached_model != current_model_path:
+                                logger.debug(
+                                    "Retrying queue_result for {} using cached model {} due to {}",
+                                    request_id,
+                                    cached_model,
+                                    exc.response.status_code,
+                                )
+                                current_model_path = cached_model
+                            else:
+                                logger.debug(
+                                    "queue_result for {} still returning {}. Will retry after {:.1f}s",
+                                    request_id,
+                                    exc.response.status_code,
+                                    delay,
+                                )
+                            time.sleep(delay)
+                            attempts += 1
+                            delay *= 1.5
+                            continue
+                        # Для 422 не ретраим - это означает, что endpoint не поддерживается для этой модели
+                        if exc.response.status_code == 422:
+                            logger.debug("queue_result returned 422 for {}, endpoint not supported", request_id)
+                            break
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
                         time.sleep(delay)
                         attempts += 1
                         delay *= 1.5
-                        continue
-                    # Для 422 не ретраим - это означает, что endpoint не поддерживается для этой модели
-                    if exc.response.status_code == 422:
-                        logger.debug("queue_result returned 422 for {}, endpoint not supported", request_id)
-                        break
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    last_error = exc
-                    time.sleep(delay)
-                    attempts += 1
-                    delay *= 1.5
-            else:
-                if last_error:
-                    logger.debug("queue_result attempts exhausted for {}: {}", request_id, last_error)
+                else:
+                    if last_error:
+                        logger.debug("queue_result attempts exhausted for {}: {}", request_id, last_error)
 
         # Добавляем raw_result и queue_response в candidates
         # Для nano-banana/edit результат может быть в queue_response из первоначального ответа

@@ -1066,6 +1066,12 @@ async def callback_operations_history(callback: CallbackQuery, state: FSMContext
     await callback.answer()
 
 
+@router.callback_query(F.data == "operations_back")
+async def callback_operations_back(callback: CallbackQuery, state: FSMContext):
+    """Return to payment menu from operations history."""
+    await callback_payment_menu(callback, state)
+
+
 @router.callback_query(F.data.startswith("operations_history_"))
 async def callback_operations_history_with_filter(callback: CallbackQuery, state: FSMContext, days: Optional[int] = None):
     data = callback.data

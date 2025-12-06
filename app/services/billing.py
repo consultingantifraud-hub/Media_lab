@@ -67,20 +67,64 @@ class BillingService:
                 user.language_code = telegram_user.language_code
                 updated = True
             # Normalize is_premium from Telegram (None -> False)
-            incoming_premium = getattr(telegram_user, "is_premium", user.is_premium)
+            # CRITICAL: getattr returns None if attribute exists but is None, not the default
+            # So we need to check explicitly
+            if hasattr(telegram_user, "is_premium"):
+                incoming_premium = telegram_user.is_premium
+            else:
+                incoming_premium = user.is_premium
+            # Always normalize, even if incoming_premium is None
             normalized_premium = BillingService._normalize_is_premium(incoming_premium)
-            if normalized_premium != user.is_premium:
+            # Always update if normalized value differs from current, or if current is None
+            if normalized_premium != user.is_premium or user.is_premium is None:
                 user.is_premium = normalized_premium
+                # CRITICAL: Verify assignment worked (SQLAlchemy might bypass validators)
+                if user.is_premium is None:
+                    logger.error(
+                        "CRITICAL: User %s.is_premium is None after assignment! Forcing via __dict__.",
+                        user.id
+                    )
+                    user.__dict__['is_premium'] = False
+                    # Also set via attribute to trigger SQLAlchemy tracking
+                    object.__setattr__(user, 'is_premium', False)
                 updated = True
             if updated:
                 from datetime import datetime, timezone
+                from sqlalchemy import inspect as sa_inspect
                 user.last_activity_at = datetime.now(timezone.utc)
+                # CRITICAL: Force normalize is_premium one more time before commit
+                # This catches any edge cases where None might have slipped through
+                if user.is_premium is None:
+                    logger.error(
+                        "CRITICAL: User %s had is_premium=None right before commit! Forcing False.",
+                        user.id
+                    )
+                    user.is_premium = False
+                # Check SQLAlchemy's internal state
+                insp = sa_inspect(user)
+                if insp.attrs.is_premium.value is None:
+                    logger.error(
+                        "CRITICAL: User %s SQLAlchemy state has is_premium=None! Forcing False.",
+                        user.id
+                    )
+                    user.is_premium = False
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(user, 'is_premium')
                 logger.info(
                     "USER UPDATE: id=%s, is_premium=%s, last_activity_at=%s",
                     user.id,
                     user.is_premium,
                     user.last_activity_at,
                 )
+                # Final check: ensure is_premium is not None in the object's dict
+                if hasattr(user, '__dict__') and user.__dict__.get('is_premium') is None:
+                    logger.error(
+                        "CRITICAL: User %s.__dict__['is_premium'] is None! Forcing False in __dict__.",
+                        user.id
+                    )
+                    user.__dict__['is_premium'] = False
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(user, 'is_premium')
                 db.commit()
                 logger.debug(f"Updated user profile: telegram_id={telegram_id}")
 

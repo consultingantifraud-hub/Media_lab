@@ -1,14 +1,21 @@
 from aiogram import Dispatcher
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update, ErrorEvent
 from loguru import logger
 
 from app.bot.handlers import setup_handlers
 
 
-async def error_handler(event: ErrorEvent) -> None:
+async def error_handler(event: ErrorEvent) -> bool:
     """Глобальный обработчик ошибок для всех обработчиков бота."""
     exception = event.exception
     update = event.update
+    if (
+        isinstance(exception, TelegramBadRequest)
+        and "message is not modified" in str(exception)
+    ):
+        logger.debug("TelegramBadRequest ignored: {}", exception)
+        return True
     
     # Логируем ошибку
     logger.error(

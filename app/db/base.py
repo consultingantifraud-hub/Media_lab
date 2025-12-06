@@ -2,6 +2,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import event
 from loguru import logger
 import os
 
@@ -55,11 +56,71 @@ else:
     )
     logger.info(f"PostgreSQL/MySQL engine configured with connection pooling")
 
+# CRITICAL: Engine-level safeguard to prevent is_premium=None in UPDATE users
+@event.listens_for(engine, "before_cursor_execute", retval=True)
+def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    """
+    Абсолютный предохранитель от is_premium=None для UPDATE users.
+    Работает на уровне engine: любое UPDATE users с is_premium=None — принудительно меняем на False.
+    """
+    try:
+        # statement может быть str или bytes
+        stmt = statement.decode() if isinstance(statement, (bytes, bytearray)) else statement
+        
+        # Интересует только UPDATE users с is_premium
+        if "UPDATE users SET" in stmt and "users" in stmt and "is_premium" in stmt:
+            # В логах видно, что параметры — dict с ключами 'is_premium' и 'users_id'
+            if isinstance(parameters, dict) and "is_premium" in parameters:
+                if parameters.get("is_premium") is None:
+                    logger.warning(
+                        "ENGINE PATCH: users.id=%s had is_premium=None before UPDATE, forcing False; stmt=%s",
+                        parameters.get("users_id"),
+                        stmt[:200] if len(stmt) > 200 else stmt,
+                    )
+                    parameters["is_premium"] = False
+            # Также обрабатываем случаи, когда parameters - это список (для executemany)
+            elif isinstance(parameters, (list, tuple)):
+                for param_dict in parameters:
+                    if isinstance(param_dict, dict) and "is_premium" in param_dict:
+                        if param_dict.get("is_premium") is None:
+                            logger.warning(
+                                "ENGINE PATCH: users.id=%s had is_premium=None before UPDATE (executemany), forcing False",
+                                param_dict.get("users_id"),
+                            )
+                            param_dict["is_premium"] = False
+    except Exception as e:
+        logger.error("ENGINE PATCH ERROR in before_cursor_execute: %r", e)
+    return statement, parameters
+
+logger.info("Engine before_cursor_execute hook for User.is_premium normalization registered")
+
 # Session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Base class for models
 Base = declarative_base()
+
+# Global safeguard: ensure User.is_premium is never None before flush
+@event.listens_for(SessionLocal, "before_flush", propagate=True)
+def _normalize_user_is_premium(session, flush_context, instances):
+    """Normalize User.is_premium (None -> False) before any flush to database."""
+    try:
+        from app.db.models import User  # local import to avoid circular
+    except Exception as e:
+        logger.debug(f"Could not import User in before_flush: {e}")
+        return
+    
+    for obj in list(session.new) + list(session.dirty):
+        if isinstance(obj, User):
+            if obj.is_premium is None:
+                user_id = getattr(obj, "id", None) or getattr(obj, "telegram_id", "unknown") if hasattr(obj, "telegram_id") else "unknown"
+                logger.warning(
+                    "User %s: is_premium=None detected in before_flush, forcing False",
+                    user_id
+                )
+                obj.is_premium = False
+
+logger.info("Session before_flush hook for User.is_premium normalization registered")
 
 
 def get_db():

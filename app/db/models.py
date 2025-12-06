@@ -1,10 +1,11 @@
 """Database models for Media Lab Bot."""
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean, event
+from sqlalchemy.orm import relationship, validates
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
 import sqlalchemy as sa
+from loguru import logger
 
 from app.db.base import Base
 
@@ -57,6 +58,28 @@ class User(Base):
     operations = relationship("Operation", back_populates="user")
     statistics = relationship("UserStatistics", back_populates="user", uselist=False)
     ai_assistant_questions = relationship("AiAssistantQuestion", back_populates="user")
+    
+    @validates('is_premium')
+    def validate_is_premium(self, key, value):
+        """Validate and normalize is_premium (None -> False) via SQLAlchemy validates."""
+        if value is None:
+            user_id = getattr(self, "id", None) or getattr(self, "telegram_id", "unknown") if hasattr(self, "telegram_id") else "unknown"
+            logger.warning(
+                "User %s: is_premium=None assigned via @validates, normalizing to False",
+                user_id
+            )
+            return False
+        return bool(value)
+    
+    def __setattr__(self, name, value):
+        """Override __setattr__ to normalize is_premium (None -> False)."""
+        if name == "is_premium" and value is None:
+            logger.warning(
+                "User %s: is_premium=None assigned via __setattr__, normalizing to False",
+                getattr(self, "id", None) if hasattr(self, "id") else getattr(self, "telegram_id", "unknown") if hasattr(self, "telegram_id") else "unknown"
+            )
+            value = False
+        super().__setattr__(name, value)
 
 
 class Balance(Base):
@@ -184,4 +207,30 @@ class AiAssistantQuestion(Base):
     # Relationships
     user = relationship("User")
 
+
+# SQLAlchemy mapper events for User model to ensure is_premium is never None
+logger.info("Registering SQLAlchemy mapper events for User.is_premium normalization")
+
+@event.listens_for(User, "before_insert", propagate=True)
+def user_before_insert(mapper, connection, target):
+    """Ensure is_premium is never None before INSERT."""
+    if target.is_premium is None:
+        logger.warning(
+            "User %s had is_premium=None before INSERT, forcing False",
+            getattr(target, "id", None) or getattr(target, "telegram_id", "unknown")
+        )
+        target.is_premium = False
+
+
+@event.listens_for(User, "before_update", propagate=True)
+def user_before_update(mapper, connection, target):
+    """Ensure is_premium is never None before UPDATE."""
+    if target.is_premium is None:
+        logger.warning(
+            "User %s had is_premium=None before UPDATE, forcing False",
+            getattr(target, "id", None) or getattr(target, "telegram_id", "unknown")
+        )
+        target.is_premium = False
+
+logger.info("SQLAlchemy mapper events for User.is_premium registered successfully")
 

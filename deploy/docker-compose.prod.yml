@@ -85,6 +85,9 @@ services:
       - media-lab-network
 
   bot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bot
     image: deploy-bot:latest
     env_file:
       - ../.env

@@ -56,3 +56,4 @@ echo "Archive dir content:" | tee -a "$LOG_FILE"
 ls -la "$ARCHIVE_DIR" | tee -a "$LOG_FILE"
 
 
+

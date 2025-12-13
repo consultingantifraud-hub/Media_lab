@@ -21,6 +21,7 @@ from app.bot.keyboards.main import (
     build_main_keyboard,
 )
 from app.providers.fal.llm import generate_prompt
+from app.utils.money import format_kopecks
 
 
 class PromptWriterStates(StatesGroup):
@@ -105,11 +106,11 @@ async def handle_prompt_writer_text(message: types.Message, state: FSMContext) -
         
         if not success:
             balance_kopecks = BillingService.get_user_balance(db, user.id)
-            balance_rub = balance_kopecks / 100.0
+            balance_text = format_kopecks(balance_kopecks)
             text = (
                 f"❌ **Недостаточно средств**\n\n"
                 f"Генерация промпта стоит: {price} ₽\n"
-                f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                f"Ваш баланс: {balance_text} ₽\n\n"
                 f"Пополните баланс для продолжения работы."
             )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[

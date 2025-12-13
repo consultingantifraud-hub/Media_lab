@@ -12,6 +12,7 @@ from PIL import Image
 from app.bot.keyboards.main import build_main_keyboard, IMAGE_STYLISH_TEXT_BUTTON
 from app.core.style_llm import wish_to_params_async
 from app.core.text_render import render_text_box
+from app.utils.money import format_kopecks
 
 # Ключи для FSM состояния
 STYLISH_STAGE_KEY = "stylish_stage"
@@ -226,11 +227,11 @@ async def handle_stylish_hint(message: types.Message, state: FSMContext) -> None
         
         if not success:
             balance_kopecks = BillingService.get_user_balance(db, user.id)
-            balance_rub = balance_kopecks / 100.0
+            balance_text = format_kopecks(balance_kopecks)
             text_error = (
                 f"❌ **Недостаточно средств**\n\n"
                 f"Добавление текста стоит: {price} ₽\n"
-                f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                f"Ваш баланс: {balance_text} ₽\n\n"
                 f"Пополните баланс для продолжения работы."
             )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[

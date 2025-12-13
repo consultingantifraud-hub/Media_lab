@@ -18,6 +18,7 @@ from app.bot.keyboards.main import (
 from app.bot.services.jobs import enqueue_face_swap
 from app.core.config import reload_settings
 from app.core.storage import storage
+from app.utils.money import format_kopecks
 from app.utils.translation import translate_to_english
 
 
@@ -259,11 +260,11 @@ async def _queue_face_swap_job(
             
             if not success:
                 balance_kopecks = BillingService.get_user_balance(db, user.id)
-                balance_rub = balance_kopecks / 100.0
+                balance_text = format_kopecks(balance_kopecks)
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Замена лица стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance_rub:.2f} ₽\n\n"
+                    f"Ваш баланс: {balance_text} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[

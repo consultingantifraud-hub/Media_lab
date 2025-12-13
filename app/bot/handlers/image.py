@@ -8,7 +8,7 @@ from uuid import uuid4
 from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from loguru import logger
 from PIL import Image
 
@@ -70,6 +70,8 @@ from app.core.storage import storage
 from app.providers.fal.client import download_file
 from app.providers.fal.models_map import resolve_alias, model_requires_mask
 from app.services.pricing import _is_seedream_model
+from app.bot.utils.billing import handle_charge_failure_message
+from app.utils.money import format_kopecks
 from app.utils.translation import translate_to_english
 
 
@@ -208,6 +210,58 @@ RETOUCHER_MODE_PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 
+async def _handle_charge_failure_message(
+    message: types.Message,
+    *,
+    price: float,
+    balance_kopecks: int,
+    error_msg: str | None,
+    cost_caption: str,
+    log_prefix: str,
+) -> bool:
+    """
+    Notify user about insufficient balance or raise on other billing errors.
+
+    Returns:
+        bool: True if the situation was handled (insufficient balance), False otherwise.
+    """
+    balance_rub = kopecks_to_rubles(balance_kopecks)
+    balance_text = format_kopecks(balance_kopecks)
+    error_text = (error_msg or "").lower()
+
+    if "insufficient balance" in error_text:
+        text = (
+            f"❌ **Недостаточно средств**\n\n"
+            f"{cost_caption}: {price} ₽\n"
+            f"Ваш баланс: {balance_text} ₽\n\n"
+            f"Пополните баланс для продолжения работы."
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="💰 Пополнить баланс",
+                        callback_data="payment_menu",
+                    )
+                ]
+            ]
+        )
+        await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+        logger.info(
+            "{}: insufficient balance detected, notified user (price={}₽, balance={}₽)",
+            log_prefix,
+            price,
+            balance_rub,
+        )
+        return True
+
+    logger.error(
+        "{}: failed to reserve operation (error_msg={!r})",
+        log_prefix,
+        error_msg,
+    )
+    raise RuntimeError(error_msg or f"{log_prefix}: failed to reserve operation")
+
 MODEL_PRESETS: dict[str, dict[str, Any]] = {
     "light": {
         "label": "изображение",
@@ -344,7 +398,6 @@ async def _enqueue_image_task(
     import asyncio
     from app.services.billing import BillingService
     from app.db.base import SessionLocal
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     
     # Определяем модель для расчета цены (до проверки баланса)
     model = base_options.get("model") if base_options else None
@@ -385,23 +438,17 @@ async def _enqueue_image_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
-                text = (
-                    f"❌ **Недостаточно средств**\n\n"
-                    f"Операция стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
-                    f"Пополните баланс для продолжения работы."
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                handled = await _handle_charge_failure_message(
+                    message,
+                    price=price,
+                    balance_kopecks=balance_kopecks,
+                    error_msg=error_msg,
+                    cost_caption="Операция стоит",
+                    log_prefix="_enqueue_image_task",
                 )
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="💰 Пополнить баланс",
-                            callback_data="payment_menu"
-                        )
-                    ]
-                ])
-                await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-                raise ValueError(f"Insufficient balance: {error_msg}")
+                if handled:
+                    return None
             
             operation_id = op_id
             logger.info("_enqueue_image_task: operation reserved, operation_id={}, price={}₽", operation_id, price)
@@ -489,7 +536,6 @@ async def _enqueue_image_edit_task(
     from app.services.billing import BillingService
     from app.services.pricing import get_operation_price
     from app.db.base import SessionLocal
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     
     # Проверка баланса (если operation_id не передан, проверяем баланс)
     if operation_id is None:
@@ -523,23 +569,17 @@ async def _enqueue_image_edit_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
-                text = (
-                    f"❌ **Недостаточно средств**\n\n"
-                    f"Редактирование стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
-                    f"Пополните баланс для продолжения работы."
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                handled = await _handle_charge_failure_message(
+                    message,
+                    price=price,
+                    balance_kopecks=balance_kopecks,
+                    error_msg=error_msg,
+                    cost_caption="Редактирование стоит",
+                    log_prefix="_enqueue_image_edit_task",
                 )
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="💰 Пополнить баланс",
-                            callback_data="payment_menu"
-                        )
-                    ]
-                ])
-                await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-                raise ValueError(f"Insufficient balance: {error_msg}")
+                if handled:
+                    return None
             
             operation_id = op_id
             logger.info("_enqueue_image_edit_task: balance charged, operation_id={}, price={}₽", operation_id, price)
@@ -826,7 +866,6 @@ async def _trigger_upscale_for_job(message: types.Message, job_id: str, operatio
     from app.services.billing import BillingService
     from app.services.pricing import get_operation_price
     from app.db.base import SessionLocal
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     
     # Проверка баланса (если operation_id не передан, проверяем баланс)
     if operation_id is None:
@@ -852,23 +891,17 @@ async def _trigger_upscale_for_job(message: types.Message, job_id: str, operatio
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
-                text = (
-                    f"❌ **Недостаточно средств**\n\n"
-                    f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
-                    f"Пополните баланс для продолжения работы."
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                handled = await _handle_charge_failure_message(
+                    message,
+                    price=price,
+                    balance_kopecks=balance_kopecks,
+                    error_msg=error_msg,
+                    cost_caption="Улучшение качества стоит",
+                    log_prefix="_trigger_upscale_for_job",
                 )
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="💰 Пополнить баланс",
-                            callback_data="payment_menu"
-                        )
-                    ]
-                ])
-                await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-                return False
+                if handled:
+                    return False
             
             operation_id = op_id
             logger.info("_trigger_upscale_for_job: balance charged, operation_id={}, price={}₽", operation_id, price)
@@ -1002,24 +1035,18 @@ async def _enqueue_retoucher_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
-                text = (
-                    f"❌ **Недостаточно средств**\n\n"
-                    f"Ретушь стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
-                    f"Пополните баланс для продолжения работы."
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                handled = await _handle_charge_failure_message(
+                    message,
+                    price=price,
+                    balance_kopecks=balance_kopecks,
+                    error_msg=error_msg,
+                    cost_caption="Ретушь стоит",
+                    log_prefix="_enqueue_retoucher_task",
                 )
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="💰 Пополнить баланс",
-                            callback_data="payment_menu"
-                        )
-                    ]
-                ])
-                await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-                await _clear_retoucher_state(state)
-                return False
+                if handled:
+                    await _clear_retoucher_state(state)
+                    return False
             
             operation_id = op_id
             logger.info("_enqueue_retoucher_task: balance charged, operation_id={}, price={}₽", operation_id, price)
@@ -1906,23 +1933,17 @@ async def _enqueue_smart_merge_task(
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
-                text = (
-                    f"❌ **Недостаточно средств**\n\n"
-                    f"Изменение стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
-                    f"Пополните баланс для продолжения работы."
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                handled = await _handle_charge_failure_message(
+                    message,
+                    price=price,
+                    balance_kopecks=balance_kopecks,
+                    error_msg=error_msg,
+                    cost_caption="Изменение стоит",
+                    log_prefix="_enqueue_smart_merge_task",
                 )
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="💰 Пополнить баланс",
-                            callback_data="payment_menu"
-                        )
-                    ]
-                ])
-                await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-                raise ValueError(f"Insufficient balance: {error_msg}")
+                if handled:
+                    return None
             
             operation_id = op_id
             logger.info("_enqueue_smart_merge_task: balance charged, operation_id={}, price={}₽", operation_id, price)
@@ -2613,24 +2634,18 @@ async def handle_edit_media(message: types.Message, state: FSMContext) -> None:
             )
             
             if not success:
-                balance = BillingService.get_user_balance(db, user.id)
-                text = (
-                    f"❌ **Недостаточно средств**\n\n"
-                    f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {round(float(balance), 2):.2f} ₽\n\n"
-                    f"Пополните баланс для продолжения работы."
+                balance_kopecks = BillingService.get_user_balance(db, user.id)
+                handled = await _handle_charge_failure_message(
+                    message,
+                    price=price,
+                    balance_kopecks=balance_kopecks,
+                    error_msg=error_msg,
+                    cost_caption="Улучшение качества стоит",
+                    log_prefix="handle_upscale_media",
                 )
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="💰 Пополнить баланс",
-                            callback_data="payment_menu"
-                        )
-                    ]
-                ])
-                await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
-                await _clear_upscale_state(state)
-                return
+                if handled:
+                    await _clear_upscale_state(state)
+                    return
             
             operation_id = op_id
             logger.info("handle_upscale_media: balance charged, operation_id={}, price={}₽", operation_id, price)

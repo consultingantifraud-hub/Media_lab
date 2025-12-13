@@ -68,6 +68,7 @@ from app.core.queues import get_job
 from app.core.storage import storage
 from app.providers.fal.client import download_file
 from app.providers.fal.models_map import resolve_alias, model_requires_mask
+from app.utils.money import format_kopecks
 from app.utils.translation import translate_to_english
 
 
@@ -379,7 +380,7 @@ async def _enqueue_image_task(
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Операция стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance} ₽\n\n"
+                    f"Ваш баланс: {format_kopecks(balance)} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -508,7 +509,7 @@ async def _enqueue_image_edit_task(
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Редактирование стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance} ₽\n\n"
+                    f"Ваш баланс: {format_kopecks(balance)} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -818,7 +819,7 @@ async def _trigger_upscale_for_job(message: types.Message, job_id: str, operatio
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance} ₽\n\n"
+                    f"Ваш баланс: {format_kopecks(balance)} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -968,7 +969,7 @@ async def _enqueue_retoucher_task(
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Ретушь стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance} ₽\n\n"
+                    f"Ваш баланс: {format_kopecks(balance)} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1748,7 +1749,7 @@ async def _enqueue_smart_merge_task(
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Изменение стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance} ₽\n\n"
+                    f"Ваш баланс: {format_kopecks(balance)} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2365,7 +2366,7 @@ async def handle_edit_media(message: types.Message, state: FSMContext) -> None:
                 text = (
                     f"❌ **Недостаточно средств**\n\n"
                     f"Улучшение качества стоит: {price} ₽\n"
-                    f"Ваш баланс: {balance} ₽\n\n"
+                    f"Ваш баланс: {format_kopecks(balance)} ₽\n\n"
                     f"Пополните баланс для продолжения работы."
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[

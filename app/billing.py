@@ -141,7 +141,7 @@ async def check_last_payment(message: Message):
         # Find last pending payment for this user
         last_payment = db.query(Payment).filter(
             Payment.user_id == user.id,
-            Payment.status == PaymentStatus.PENDING
+            Payment.status.in_([PaymentStatus.PENDING, PaymentStatus.STALE])
         ).order_by(Payment.created_at.desc()).first()
         
         if not last_payment:
@@ -151,6 +151,13 @@ async def check_last_payment(message: Message):
         if not last_payment.yookassa_payment_id:
             await message.answer("⚠️ Платеж найден, но ID YooKassa отсутствует.")
             return
+        
+        if last_payment.status == PaymentStatus.STALE:
+            await message.answer(
+                "ℹ️ Платёж всё ещё подтверждается YooKassa.\n"
+                "Мы автоматически повторяем проверки, но вы можете запустить ручную проверку ниже.",
+                parse_mode="Markdown",
+            )
         
         # Check status from YooKassa
         await message.answer("⏳ Проверяю статус платежа...")
@@ -163,12 +170,18 @@ async def check_last_payment(message: Message):
             if status_info["status"] == "succeeded" and status_info["paid"]:
                 balance_after = BillingService.get_user_balance(db, user.id)
                 balance_after_rubles = balance_after / 100.0
-                await message.answer(
-                    f"✅ **Оплата успешно подтверждена!**\n\n"
-                    f"💰 Ваш баланс пополнен на {status_info['amount']:.2f}₽\n"
-                    f"💵 Текущий баланс: {balance_after_rubles:.2f}₽",
-                    parse_mode="Markdown"
-                )
+                if status_info.get("credited", False):
+                    text = (
+                        "✅ **Оплата успешно подтверждена!**\n\n"
+                        f"💰 Ваш баланс пополнен на {status_info['amount']:.2f}₽\n"
+                        f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
+                    )
+                else:
+                    text = (
+                        "ℹ️ **Оплата уже была зачислена ранее.**\n\n"
+                        f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
+                    )
+                await message.answer(text, parse_mode="Markdown")
             elif status_info["status"] == "pending":
                 await message.answer(
                     "⏳ **Платеж обрабатывается...**\n\n"
@@ -212,7 +225,7 @@ async def show_balance(message: Message, state: FSMContext = None):
         if user_obj:
             pending_payments = db.query(Payment).filter(
                 Payment.user_id == user_obj.id,
-                Payment.status == PaymentStatus.PENDING
+                Payment.status.in_([PaymentStatus.PENDING, PaymentStatus.STALE])
             ).order_by(Payment.created_at.desc()).limit(1).all()
             
             for payment in pending_payments:

@@ -5,6 +5,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 
 from app.bot.keyboards.main import build_main_keyboard
+from app.services.billing import BillingService
 
 START_INSTRUCTION = (
     "Добро пожаловать в Telegram-сервис генерации и обработки изображений.\n\n"
@@ -76,9 +77,21 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
                     )
                     if status_info:
                         if status_info["status"] == "succeeded" and status_info["paid"]:
+                            balance_after = BillingService.get_user_balance(db, payment.user_id)
+                            balance_after_rubles = balance_after / 100.0
+                            if status_info.get("credited", False):
+                                text = (
+                                    "✅ **Оплата успешно подтверждена!**\n\n"
+                                    f"💰 Ваш баланс пополнен на {status_info['amount']:.2f}₽\n"
+                                    f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
+                                )
+                            else:
+                                text = (
+                                    "ℹ️ **Оплата уже была зачислена ранее.**\n\n"
+                                    f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
+                                )
                             await message.answer(
-                                "✅ **Оплата успешно подтверждена!**\n\n"
-                                f"💰 Ваш баланс пополнен на {status_info['amount']:.2f}₽",
+                                text,
                                 reply_markup=build_main_keyboard(),
                                 parse_mode="Markdown"
                             )

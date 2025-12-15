@@ -3,14 +3,16 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from loguru import logger
 from typing import Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
 import os
 import httpx
 import uuid
 import hmac
 import hashlib
 import base64
+import time
 
-from app.db.models import User, Payment, PaymentStatus
+from app.db.models import User, Payment, PaymentStatus, Balance
 from app.db.base import SessionLocal
 from app.services.billing import BillingService
 
@@ -21,6 +23,11 @@ YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://t.me/neurostudio
 YOOKASSA_CURRENCY = os.getenv("YOOKASSA_CURRENCY", "RUB")
 YOOKASSA_API_URL = "https://api.yookassa.ru/v3"
 YOOKASSA_WEBHOOK_URL = os.getenv("YOOKASSA_WEBHOOK_URL", "")
+PAYMENT_RECONCILE_BATCH_SIZE = int(os.getenv("PAYMENT_RECONCILE_BATCH_SIZE", "50"))
+PAYMENT_RECONCILE_GRACE_SECONDS = int(os.getenv("PAYMENT_RECONCILE_GRACE_SECONDS", "20"))
+PAYMENT_RECONCILE_MAX_AGE_SECONDS = int(os.getenv("PAYMENT_RECONCILE_MAX_AGE_SECONDS", str(12 * 3600)))
+PAYMENT_STALE_RECHECK_SECONDS = int(os.getenv("PAYMENT_STALE_RECHECK_SECONDS", str(24 * 3600)))
+PAYMENT_RECONCILE_INTERVAL_SECONDS = int(os.getenv("PAYMENT_RECONCILE_INTERVAL_SECONDS", "20"))
 
 
 class PaymentService:
@@ -243,96 +250,35 @@ class PaymentService:
             logger.error("No payment ID in webhook")
             return False
 
-        # Find payment in database
-        payment = db.query(Payment).filter(
-            Payment.yookassa_payment_id == yookassa_payment_id
-        ).first()
+        payment = (
+            db.query(Payment)
+            .filter(Payment.yookassa_payment_id == yookassa_payment_id)
+            .with_for_update()
+            .first()
+        )
 
         if not payment:
             logger.error(f"Payment not found: yookassa_payment_id={yookassa_payment_id}")
             return False
 
-        # Check if already processed
-        if payment.status == PaymentStatus.SUCCEEDED:
-            logger.info(f"Payment already processed: payment_id={payment.id}")
-            return True
-
-        # Проверка суммы платежа (из webhook)
         webhook_amount_value = payment_object.get("amount", {}).get("value")
         if webhook_amount_value:
-            webhook_amount_kopecks = int(float(webhook_amount_value) * 100)  # Конвертируем в копейки
+            webhook_amount_kopecks = int(float(webhook_amount_value) * 100)
             if webhook_amount_kopecks != payment.amount:
                 logger.error(
                     f"Amount mismatch for payment {payment.id}: "
                     f"DB={payment.amount} kopecks, webhook={webhook_amount_kopecks} kopecks"
                 )
-                # Не отклоняем платеж, но логируем ошибку
-                # В реальности суммы должны совпадать
 
-        # Получаем баланс до пополнения
-        balance_before = BillingService.get_user_balance(db, payment.user_id)
-
-        # Update payment status
-        payment.status = PaymentStatus.SUCCEEDED
-        payment.raw_data = webhook_data
-        db.flush()
-
-        # Add balance to user
-        # payment.amount is in kopecks, but add_balance expects rubles (int) and converts to kopecks
-        # So we need to convert kopecks back to rubles
-        amount_rubles = payment.amount / 100.0
-        logger.info(f"Processing webhook payment: payment_id={payment.id}, amount={payment.amount} kopecks ({amount_rubles}₽)")
-        success = BillingService.add_balance(db, payment.user_id, int(amount_rubles))
-        if success:
-            # Получаем баланс после пополнения
-            balance_after = BillingService.get_user_balance(db, payment.user_id)
-            
-            # Получаем пользователя для отправки уведомления
-            from app.db.models import User
-            user = db.query(User).filter(User.id == payment.user_id).first()
-            
-            db.commit()
-            
-            # Детальное логирование
-            # Convert kopecks to rubles for logging
-            amount_rubles = payment.amount / 100.0
-            balance_before_rubles = balance_before / 100.0
-            balance_after_rubles = balance_after / 100.0
-            logger.info(
-                f"Payment processed successfully: "
-                f"payment_id={payment.id}, "
-                f"yookassa_id={yookassa_payment_id}, "
-                f"user_id={payment.user_id}, "
-                f"amount={amount_rubles:.2f}₽ ({payment.amount} kopecks), "
-                f"balance_before={balance_before_rubles:.2f}₽ ({balance_before} kopecks), "
-                f"balance_after={balance_after_rubles:.2f}₽ ({balance_after} kopecks)"
-            )
-            
-            # Отправка уведомления пользователю
-            if user:
-                try:
-                    from app.core.telegram_sync import send_message_sync
-                    # payment.amount is in kopecks, convert to rubles for display
-                    amount_rubles = payment.amount / 100.0
-                    balance_after_rubles = balance_after / 100.0
-                    send_message_sync(
-                        chat_id=user.telegram_id,
-                        text=(
-                            f"🎉 **Оплата прошла успешно!**\n\n"
-                            f"💰 Ваш баланс пополнен на {amount_rubles:.2f}₽\n"
-                            f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
-                        ),
-                        parse_mode="Markdown"
-                    )
-                    logger.info(f"Payment notification sent to user {user.telegram_id}")
-                except Exception as e:
-                    logger.error(f"Failed to send payment notification to user {user.telegram_id}: {e}", exc_info=True)
-            
-            return True
-        else:
-            db.rollback()
-            logger.error(f"Failed to add balance for payment: payment_id={payment.id}")
-            return False
+        success, _ = PaymentService._finalize_payment_credit(
+            db,
+            payment,
+            raw_payload=webhook_data,
+            source="webhook",
+        )
+        if not success:
+            logger.error(f"Failed to finalize webhook payment: payment_id={payment.id}")
+        return success
 
     @staticmethod
     def _handle_payment_canceled(db: Session, payment_object: Dict[str, Any]) -> bool:
@@ -342,20 +288,170 @@ class PaymentService:
             logger.error("No payment ID in canceled payment webhook")
             return False
 
-        payment = db.query(Payment).filter(
-            Payment.yookassa_payment_id == yookassa_payment_id
-        ).first()
+        payment = (
+            db.query(Payment)
+            .filter(Payment.yookassa_payment_id == yookassa_payment_id)
+            .with_for_update()
+            .first()
+        )
 
         if not payment:
             logger.error(f"Payment not found for cancellation: yookassa_payment_id={yookassa_payment_id}")
             return False
 
-        # Update payment status
         payment.status = PaymentStatus.CANCELED
+        payment.raw_data = payment_object
         db.commit()
-        
+
         logger.info(f"Payment canceled: payment_id={payment.id}, yookassa_id={yookassa_payment_id}")
         return True
+
+    @staticmethod
+    def _finalize_payment_credit(
+        db: Session,
+        payment: Payment,
+        *,
+        source: str,
+        raw_payload: Optional[Dict[str, Any]] = None,
+    ) -> tuple[bool, bool]:
+        """
+        Apply credit for successful payment in a single transaction.
+        
+        Returns:
+            tuple[bool, bool]: (operation_success, credited_now_flag)
+        """
+        if not payment:
+            logger.error(f"{source}: payment object is missing")
+            return False, False
+
+        try:
+            payment = (
+                db.query(Payment)
+                .filter(Payment.id == payment.id)
+                .with_for_update()
+                .one_or_none()
+            )
+            if not payment:
+                logger.error(f"{source}: payment row missing during finalize")
+                return False, False
+            if payment.credited_at:
+                if payment.status != PaymentStatus.SUCCEEDED:
+                    payment.status = PaymentStatus.SUCCEEDED
+                    db.flush()
+                logger.info(
+                    f"{source}: payment already credited at {payment.credited_at} (payment_id={payment.id})"
+                )
+                return True, False
+            if payment.status == PaymentStatus.SUCCEEDED:
+                logger.info(f"{source}: payment already succeeded (payment_id={payment.id})")
+                return True, False
+
+            balance = (
+                db.query(Balance)
+                .filter(Balance.user_id == payment.user_id)
+                .with_for_update()
+                .first()
+            )
+            if not balance:
+                balance = Balance(user_id=payment.user_id, balance=0)
+                db.add(balance)
+                db.flush()
+
+            balance_before = balance.balance
+            balance.balance += payment.amount
+            credited_now = True
+
+            if raw_payload is not None:
+                merged_payload: Any = raw_payload
+                if isinstance(raw_payload, dict):
+                    merged_payload = raw_payload.copy()
+                    existing_metadata = {}
+                    if isinstance(payment.raw_data, dict):
+                        existing_metadata = payment.raw_data.get("metadata") or {}
+                    metadata = dict(merged_payload.get("metadata") or {})
+                    return_payment_id = existing_metadata.get("return_payment_id")
+                    if return_payment_id and "return_payment_id" not in metadata:
+                        metadata["return_payment_id"] = return_payment_id
+                    if metadata:
+                        merged_payload["metadata"] = metadata
+                payment.raw_data = merged_payload
+
+            payment.status = PaymentStatus.SUCCEEDED
+            payment.credited_at = datetime.now(timezone.utc)
+            db.flush()
+
+            balance_after = balance.balance
+            user = db.query(User).filter(User.id == payment.user_id).first()
+            db.commit()
+
+            amount_rubles = payment.amount / 100.0
+            balance_before_rubles = balance_before / 100.0
+            balance_after_rubles = balance_after / 100.0
+            logger.info(
+                f"{source}: payment finalized "
+                f"(payment_id={payment.id}, yookassa_id={payment.yookassa_payment_id}, "
+                f"amount={amount_rubles:.2f}₽, balance_before={balance_before_rubles:.2f}₽, "
+                f"balance_after={balance_after_rubles:.2f}₽)"
+            )
+
+            if user and credited_now:
+                try:
+                    from app.core.telegram_sync import send_message_sync
+
+                    send_message_sync(
+                        chat_id=user.telegram_id,
+                        text=(
+                            f"🎉 **Оплата прошла успешно!**\n\n"
+                            f"💰 Ваш баланс пополнен на {amount_rubles:.2f}₽\n"
+                            f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    logger.info(f"{source}: payment notification sent to user {user.telegram_id}")
+                except Exception as notify_err:
+                    logger.error(
+                        f"{source}: failed to send payment notification to user {user.telegram_id}: {notify_err}",
+                        exc_info=True,
+                    )
+            return True, credited_now
+        except Exception as exc:
+            db.rollback()
+            logger.error(
+                f"{source}: failed to finalize payment_id={payment.id if payment else 'unknown'}: {exc}",
+                exc_info=True,
+            )
+            return False, False
+
+    @staticmethod
+    def _mark_payment_stale(db: Session, payment: Payment, reason: str) -> None:
+        """Mark payment as STALE to reduce reconcile frequency."""
+        if payment.status == PaymentStatus.STALE:
+            # Update metadata only
+            note = {
+                "stale_reason": reason,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if isinstance(payment.raw_data, dict):
+                payload = payment.raw_data.copy()
+            else:
+                payload = {}
+            payload["stale_info"] = note
+            payment.raw_data = payload
+            db.commit()
+            return
+
+        note = {
+            "stale_reason": reason,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if isinstance(payment.raw_data, dict):
+            payload = payment.raw_data.copy()
+        else:
+            payload = {}
+        payload["stale_info"] = note
+        payment.raw_data = payload
+        payment.status = PaymentStatus.STALE
+        db.commit()
 
     @staticmethod
     def verify_webhook_signature(webhook_data: Dict[str, Any], signature: Optional[str] = None) -> bool:
@@ -398,6 +494,15 @@ class PaymentService:
             return None
 
         try:
+            payment_lookup = (
+                db.query(Payment)
+                .filter(Payment.yookassa_payment_id == yookassa_payment_id)
+                .first()
+            )
+            if not payment_lookup:
+                logger.warning(f"Payment not found in DB: yookassa_id={yookassa_payment_id}")
+                return None
+
             # Make request to YooKassa
             auth_string = f"{YOOKASSA_SHOP_ID}:{YOOKASSA_SECRET_KEY}"
             auth_bytes = auth_string.encode("utf-8")
@@ -448,6 +553,16 @@ class PaymentService:
             if last_exception and 'response' not in locals():
                 raise last_exception
 
+            if response.status_code == 404:
+                logger.warning(f"YooKassa payment not found: yookassa_id={yookassa_payment_id}")
+                return {
+                    "status": "not_found",
+                    "paid": False,
+                    "payment_id": payment_lookup.id,
+                    "amount": payment_lookup.amount / 100.0,
+                    "credited": False,
+                }
+
             if response.status_code != 200:
                 logger.error(f"YooKassa API error: {response.status_code}, {response.text}")
                 return None
@@ -456,52 +571,32 @@ class PaymentService:
             status = payment_data.get("status")
             paid = payment_data.get("paid", False)
 
-            # Find payment in database
-            payment = db.query(Payment).filter(
+            query = db.query(Payment).filter(
                 Payment.yookassa_payment_id == yookassa_payment_id
-            ).first()
+            )
+            if status in {"succeeded", "canceled"}:
+                query = query.with_for_update()
+
+            payment = query.first()
 
             if not payment:
                 logger.warning(f"Payment not found in DB: yookassa_id={yookassa_payment_id}")
                 return None
 
-            # Update status if changed
-            if status == "succeeded" and payment.status != PaymentStatus.SUCCEEDED:
-                if paid:
-                    # Process payment
-                    # payment.amount is in kopecks, add_balance expects rubles (int) and converts to kopecks
-                    amount_rubles = payment.amount / 100.0
-                    logger.info(f"Processing payment: payment_id={payment.id}, amount={payment.amount} kopecks ({amount_rubles}₽)")
-                    success = BillingService.add_balance(db, payment.user_id, int(amount_rubles))
-                    if success:
-                        payment.status = PaymentStatus.SUCCEEDED
-                        payment.raw_data = payment_data
-                        db.commit()
-                        
-                        # Send notification to user
-                        from app.db.models import User
-                        user = db.query(User).filter(User.id == payment.user_id).first()
-                        if user:
-                            try:
-                                from app.core.telegram_sync import send_message_sync
-                                balance_after = BillingService.get_user_balance(db, payment.user_id)
-                                balance_after_rubles = balance_after / 100.0
-                                send_message_sync(
-                                    chat_id=user.telegram_id,
-                                    text=(
-                                        f"🎉 *Оплата прошла успешно!*\n\n"
-                                        f"💰 Ваш баланс пополнен на {amount_rubles:.2f}₽\n"
-                                        f"💵 Текущий баланс: {balance_after_rubles:.2f}₽"
-                                    ),
-                                    parse_mode="Markdown"
-                                )
-                            except Exception as e:
-                                logger.error(f"Failed to send notification: {e}")
-                        
-                        logger.info(f"Payment confirmed: payment_id={payment.id}, amount={amount_rubles}₽")
+            if status == "succeeded":
+                if not paid:
+                    logger.warning(f"Payment {payment.id} is marked succeeded but paid flag is false, skipping credit")
+                else:
+                    processed, credited_now = PaymentService._finalize_payment_credit(
+                        db,
+                        payment,
+                        raw_payload=payment_data,
+                        source="status_check",
+                    )
+                    if not processed:
+                        logger.error(f"Failed to finalize payment via status_check: payment_id={payment.id}")
                     else:
-                        db.rollback()
-                        logger.error(f"Failed to add balance for payment: payment_id={payment.id}")
+                        payment_data["credited_now"] = credited_now
             elif status == "canceled" and payment.status != PaymentStatus.CANCELED:
                 payment.status = PaymentStatus.CANCELED
                 payment.raw_data = payment_data
@@ -513,11 +608,212 @@ class PaymentService:
                 "paid": paid,
                 "payment_id": payment.id,
                 "amount": payment.amount / 100.0,
+                "credited": payment_data.get("credited_now", False),
             }
 
         except Exception as e:
             logger.error(f"Error checking payment status: {e}", exc_info=True)
             return None
+
+    @staticmethod
+    def _check_status_with_retry(
+        db: Session,
+        payment: Payment,
+        *,
+        max_attempts: int = 3,
+    ) -> Optional[Dict[str, Any]]:
+        delay = 2
+        for attempt in range(1, max_attempts + 1):
+            result = PaymentService.check_payment_status_from_yookassa(db, payment.yookassa_payment_id)
+            if result is not None:
+                return result
+            if attempt < max_attempts:
+                logger.warning(
+                    "Retrying YooKassa status check for payment_id=%s (attempt %s/%s)",
+                    payment.id,
+                    attempt + 1,
+                    max_attempts,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+        return None
+
+    @staticmethod
+    def reconcile_pending_payments(
+        batch_size: int = PAYMENT_RECONCILE_BATCH_SIZE,
+        min_age_seconds: int = PAYMENT_RECONCILE_GRACE_SECONDS,
+    ) -> Dict[str, int]:
+        """
+        Check provider state for pending payments and apply credit if needed.
+        Returns summary statistics for logging.
+        """
+        if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
+            logger.warning("YooKassa credentials not configured, skipping reconciliation")
+            return {
+                "scanned": 0,
+                "processed": 0,
+                "succeeded": 0,
+                "canceled": 0,
+                "credited": 0,
+                "stale": 0,
+                "errors": 0,
+            }
+
+        db = SessionLocal()
+        stats = {
+            "scanned": 0,
+            "processed": 0,
+            "succeeded": 0,
+            "canceled": 0,
+            "credited": 0,
+            "stale": 0,
+            "errors": 0,
+        }
+        try:
+            now = datetime.now(timezone.utc)
+            grace_cutoff = now - timedelta(seconds=min_age_seconds)
+            stale_cutoff = now - timedelta(seconds=PAYMENT_RECONCILE_MAX_AGE_SECONDS)
+            stale_recheck_cutoff = now - timedelta(seconds=PAYMENT_STALE_RECHECK_SECONDS)
+
+            remaining = batch_size
+
+            fresh_pending = (
+                db.query(Payment)
+                .filter(Payment.status == PaymentStatus.PENDING)
+                .filter(Payment.created_at.isnot(None))
+                .filter(Payment.created_at < grace_cutoff)
+                .filter(Payment.created_at >= stale_cutoff)
+                .order_by(Payment.created_at)
+                .limit(max(0, remaining))
+                .all()
+            )
+            remaining -= len(fresh_pending)
+
+            aged_pending: list[Payment] = []
+            if remaining > 0:
+                aged_pending = (
+                    db.query(Payment)
+                    .filter(Payment.status == PaymentStatus.PENDING)
+                    .filter(Payment.created_at.isnot(None))
+                    .filter(Payment.created_at < stale_cutoff)
+                    .order_by(Payment.created_at)
+                    .limit(max(0, remaining))
+                    .all()
+                )
+                remaining -= len(aged_pending)
+
+            stale_retry: list[Payment] = []
+            if remaining > 0:
+                stale_retry = (
+                    db.query(Payment)
+                    .filter(Payment.status == PaymentStatus.STALE)
+                    .filter(Payment.updated_at <= stale_recheck_cutoff)
+                    .order_by(Payment.updated_at)
+                    .limit(max(0, remaining))
+                    .all()
+                )
+                remaining -= len(stale_retry)
+
+            stats["scanned"] = len(fresh_pending) + len(aged_pending) + len(stale_retry)
+
+            for payment in fresh_pending:
+                if not payment.yookassa_payment_id:
+                    logger.error(f"Skipping payment without provider ID: payment_id={payment.id}")
+                    stats["errors"] += 1
+                    continue
+
+                prev_status = payment.status
+                stats["processed"] += 1
+                result = PaymentService._check_status_with_retry(db, payment)
+                if result is None:
+                    stats["errors"] += 1
+                    continue
+
+                db.refresh(payment)
+                if payment.status == PaymentStatus.SUCCEEDED and prev_status != PaymentStatus.SUCCEEDED:
+                    stats["succeeded"] += 1
+                    stats["credited"] += 1
+                if payment.status == PaymentStatus.CANCELED and prev_status != PaymentStatus.CANCELED:
+                    stats["canceled"] += 1
+
+            for payment in aged_pending:
+                if not payment.yookassa_payment_id:
+                    logger.error(f"Skipping old payment without provider ID: payment_id={payment.id}")
+                    stats["errors"] += 1
+                    continue
+
+                prev_status = payment.status
+                stats["processed"] += 1
+                result = PaymentService._check_status_with_retry(db, payment, max_attempts=1)
+                if result is None:
+                    if prev_status != PaymentStatus.STALE:
+                        stats["stale"] += 1
+                    PaymentService._mark_payment_stale(db, payment, "provider_error")
+                    continue
+
+                status = (result.get("status") or "").lower()
+                if status == "succeeded":
+                    db.refresh(payment)
+                    if payment.status == PaymentStatus.SUCCEEDED and prev_status != PaymentStatus.SUCCEEDED:
+                        stats["succeeded"] += 1
+                        stats["credited"] += 1
+                    continue
+
+                if status in {"canceled", "expired"}:
+                    payment.status = PaymentStatus.CANCELED
+                    payment.raw_data = result
+                    db.commit()
+                    if prev_status != PaymentStatus.CANCELED:
+                        stats["canceled"] += 1
+                    continue
+
+                if prev_status != PaymentStatus.STALE:
+                    stats["stale"] += 1
+                PaymentService._mark_payment_stale(db, payment, status or "unknown")
+
+            for payment in stale_retry:
+                if not payment.yookassa_payment_id:
+                    logger.error(f"Skipping stale payment without provider ID: payment_id={payment.id}")
+                    stats["errors"] += 1
+                    continue
+
+                prev_status = payment.status
+                stats["processed"] += 1
+                result = PaymentService._check_status_with_retry(db, payment, max_attempts=1)
+                if result is None:
+                    PaymentService._mark_payment_stale(db, payment, "provider_error_retry")
+                    continue
+
+                status = (result.get("status") or "").lower()
+                if status == "succeeded":
+                    db.refresh(payment)
+                    if payment.status == PaymentStatus.SUCCEEDED and prev_status != PaymentStatus.SUCCEEDED:
+                        stats["succeeded"] += 1
+                        stats["credited"] += 1
+                    continue
+
+                if status in {"canceled", "expired"}:
+                    payment.status = PaymentStatus.CANCELED
+                    payment.raw_data = result
+                    db.commit()
+                    if prev_status != PaymentStatus.CANCELED:
+                        stats["canceled"] += 1
+                    continue
+
+                PaymentService._mark_payment_stale(db, payment, status or "pending")
+
+            if stats["stale"]:
+                logger.warning(
+                    "Marked %s payments as stale (YooKassa unreachable or not_found)",
+                    stats["stale"],
+                )
+            return stats
+        except Exception as exc:
+            logger.error(f"Failed to reconcile pending payments: {exc}", exc_info=True)
+            stats["errors"] += 1
+            return stats
+        finally:
+            db.close()
 
 
 # Convenience functions

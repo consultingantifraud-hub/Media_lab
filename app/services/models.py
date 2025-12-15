@@ -1,5 +1,5 @@
 """Database models for Media Lab Bot."""
-from sqlalchemy import Column, Integer, BigInteger, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, ForeignKey, Enum, JSON, Text, Boolean, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -12,6 +12,7 @@ from app.db.base import Base
 class PaymentStatus(str, enum.Enum):
     """Payment status enum."""
     PENDING = "pending"
+    STALE = "stale"
     SUCCEEDED = "succeeded"
     CANCELED = "canceled"
     FAILED = "failed"
@@ -74,6 +75,9 @@ class Balance(Base):
 class Payment(Base):
     """Payment model."""
     __tablename__ = "payments"
+    __table_args__ = (
+        Index("ix_payments_status_created_at", "status", "created_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
@@ -81,6 +85,7 @@ class Payment(Base):
     amount = Column(BigInteger, nullable=False)  # Amount in kopecks (like balance)
     status = Column(Enum(PaymentStatus), default=PaymentStatus.PENDING, nullable=False)
     raw_data = Column(JSON, nullable=True)  # Raw webhook data for debugging
+    credited_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

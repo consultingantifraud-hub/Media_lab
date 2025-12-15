@@ -19,3 +19,5 @@ def format_kopecks(amount_kopecks: Number) -> str:
     """Format kopeck amount as 'xx.xx' rubles string."""
     return f"{kopecks_to_rubles(amount_kopecks):.2f}"
 
+
+

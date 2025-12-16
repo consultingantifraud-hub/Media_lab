@@ -21,3 +21,4 @@ def format_kopecks(amount_kopecks: Number) -> str:
 
 
 
+

@@ -14,10 +14,14 @@ from loguru import logger
 from rq import get_current_job
 from PIL import Image
 
-# JobTimeoutException не существует в RQ 1.15.1, создаем свой класс
-class JobTimeoutException(Exception):
-    """Исключение для обработки таймаутов задач RQ"""
-    pass
+# JobTimeoutException может существовать в новых версиях RQ
+try:
+    from rq.timeouts import JobTimeoutException
+except ImportError:
+    # Для старых версий RQ создаем свой класс
+    class JobTimeoutException(Exception):
+        """Исключение для обработки таймаутов задач RQ"""
+        pass
 
 from app.core.config import settings
 from app.core.queues import get_job
@@ -1618,6 +1622,22 @@ def process_image_job(job_id: str, prompt: str, options: dict | None, output_pat
         
         # Формируем понятное сообщение для пользователя в зависимости от типа ошибки
         user_error_msg = None
+        
+        # Обработка таймаута (может попасть сюда, если RQ выбрасывает реальный JobTimeoutException)
+        if isinstance(e, JobTimeoutException) or "Task exceeded maximum timeout" in error_str or error_type == "JobTimeoutException":
+            logger.error("Image job {} timed out after timeout period", job_id)
+            _handle_job_timeout(job_id, notify_options, "генерации изображения")
+            # Mark operation as failed
+            if operation_id:
+                db = SessionLocal()
+                try:
+                    BillingService.fail_operation(db, operation_id)
+                    logger.info("Marked operation {} as failed for job {} due to timeout", operation_id, job_id)
+                except Exception as fail_error:
+                    logger.error("Error failing operation {} for job {}: {}", operation_id, job_id, fail_error, exc_info=True)
+                finally:
+                    db.close()
+            raise
         
         if "content policy violation" in error_str.lower() or "content checker" in error_str.lower():
             user_error_msg = (

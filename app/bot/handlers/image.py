@@ -71,7 +71,7 @@ from app.providers.fal.client import download_file
 from app.providers.fal.models_map import resolve_alias, model_requires_mask
 from app.services.pricing import _is_seedream_model
 from app.bot.utils.billing import handle_charge_failure_message
-from app.utils.money import format_kopecks
+from app.utils.money import format_kopecks, kopecks_to_rubles
 from app.utils.translation import translate_to_english
 
 
@@ -518,7 +518,13 @@ async def _enqueue_image_task(
         LAST_JOB_BY_CHAT[message.chat.id] = job_id
     logger.info("_enqueue_image_task: sending 'Генерирую' message to chat_id={}", 
                 message.chat.id if message.chat else None)
-    await message.answer(f"🚀 Генерирую: {label}\nПромпт: {prompt}", reply_markup=build_main_keyboard())
+    # Telegram limit: 4096 characters. Reserve space for prefix "🚀 Генерирую: {label}\nПромпт: "
+    prefix = f"🚀 Генерирую: {label}\nПромпт: "
+    max_prompt_len = 4096 - len(prefix) - 100  # Reserve 100 chars for safety
+    display_prompt = prompt[:max_prompt_len] if len(prompt) > max_prompt_len else prompt
+    if len(prompt) > max_prompt_len:
+        display_prompt += "..."
+    await message.answer(f"{prefix}{display_prompt}", reply_markup=build_main_keyboard())
     logger.info("_enqueue_image_task: 'Генерирую' message sent successfully")
     return job_id
 
